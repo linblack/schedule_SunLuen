@@ -18,12 +18,11 @@ import pandas as pd #資料前處理，可以擷取 JSON, CSV, Excel, HTML 等�
 #from getDBData import FetchDataFromSqlDB
 from getDBData import TestDBconnection
 from getDBData import fetch_dyeing_data_without_2weeks#目前沒有抓取兩周內的資料
-from getDBData import fetch_dyeing_data_with_Totolcon#0105:去抓取幕目前總濃度的相關資料，再與工單資料合併
+from getDBData import fetch_dyeing_data_with_Totolcon#0105:去抓取目前總濃度的相關資料，再與工單資料合併
 from Queue import queue#新增排缸queue物件
 from cylinder import cylinder#新增缸物件
 from jobtask import jobtask#新增工單物件
 from config import config#新增config物件去讀取資料庫參數
-from tkinter.messagebox import showinfo
 #from loadExcelFile import LoadExcelFile#載入相關檔案
 from logbook import  Logger, StreamHandler, FileHandler#1211新增logbook紀錄相關程式狀況
 from datetime import datetime #時間
@@ -41,7 +40,7 @@ def compare(_reclist, tree):#進行與現在時間排程比較: 輸入(資料Lis
     global return_list
     return_list=[]
     temp=[]
-    temp=_reclist
+    temp=_reclist #_reclist=temp_tuple[100筆]
     d = datetime.now()#取得目前時間
     t = d.time()
     current_year=0
@@ -69,12 +68,15 @@ def compare(_reclist, tree):#進行與現在時間排程比較: 輸入(資料Lis
             _temp=()
             time1=datetime.strptime(temp[j][1], TIMEFORMAT_WITHOUT_MS)
             time2=datetime.strptime(temp[j+1][1], TIMEFORMAT_WITHOUT_MS)
+            #print(time1)
+            #print(time2)
             #0212:轉換為time1，time2去計算時間差距為何，提供後續排序使用
             
             if time1>time2 and j<=len(temp):
                 _temp=temp[j]
                 temp[j]=temp[j+1]
                 temp[j+1]=_temp
+                #print(_temp)
     #後續為顯示相關排序結果
     #回存gloabl變數return_list中，等候輸出使用
     first=0
@@ -500,7 +502,7 @@ def ProcessSchedulingOnCylinders(_rec_cylinderlists, _schedule_list):
     j=0
     global Unable_Schedule_List
     Unable_Schedule_List=[]#儲存投胚量為0的工單編號list
-    for i,item in enumerate(_rec_jobtask_list):
+    for i,item in enumerate(_rec_jobtask_list): #enumerate=>index運用需求
         temp_yard=0.0
         temp_qty=0.0
         temp_total_com=0.0
@@ -585,7 +587,7 @@ def ProcessSchedulingOnCylinders(_rec_cylinderlists, _schedule_list):
     print_scheduled_jobno_for_each_cylinder(processing_cylinder_list[24].get_cylinder_con_list(),cy26_schedule)
     
     print_scheduled_jobno_for_each_cylinder(processing_cylinder_list[25].get_cylinder_con_list(),cy32_schedule)
-  
+
     #0111:這邊顯示戰存區相關工單與濃度資料
     print_scheduled_jobno_for_each_cylinder(recyce_list,listbox_temp)
     
@@ -705,9 +707,7 @@ def Find_Best_Cylinder_To_Schedule(_test_no, _test_con, _test_yard, _test_qty,_p
    
     global _diff_list_minus_1_list
     _diff_list_minus_1_list = [i for i in _diff_list_minus_0_list if i[1] >= 0]
-    
     _diff_list_minus_1_list=sorted(_diff_list_minus_1_list, key=operator.itemgetter(1, 2))
-    
     #0131: 經過上面的過濾，可過濾出最相近的缸號是哪一缸，便可依照此缸號排入缸號list中。
     #_diff_list=sorted(_diff_list, key=operator.itemgetter(1, 2))#依照yard 跟weight 去排序
     
@@ -723,7 +723,7 @@ def Find_Best_Cylinder_To_Schedule(_test_no, _test_con, _test_yard, _test_qty,_p
                 _result_class=_diff_list_minus_1_list[j][2]
             elif j+1<len(_diff_list_minus_1_list):
                 if _testing_qty<=_diff_list_minus_1_list[j+1][0]:
-                    _result_class=_diff_list_minus_1_list[j][2]
+                    _result_class=_diff_list_minus_1_list[j][2] #1
                     break
         else:
             continue 
@@ -732,9 +732,9 @@ def Find_Best_Cylinder_To_Schedule(_test_no, _test_con, _test_yard, _test_qty,_p
     #==================2. 找出分類中的第幾號缸，排入缸中
     global _dispatched_group,_dispatched_ptr,_dispatched_cylinder        
     _dispatched_group=()
-    _dispatched_group=cy_group_list[_result_class]
-    _dispatched_ptr=cy_ptr_list[_result_class]
-    
+    _dispatched_group=cy_group_list[_result_class] #(14,32)
+    _dispatched_ptr=cy_ptr_list[_result_class] #0
+
     if _dispatched_ptr<len(_dispatched_group):
         _dispatched_cylinder=_dispatched_group[_dispatched_ptr]
     else:
@@ -749,7 +749,7 @@ def Find_Best_Cylinder_To_Schedule(_test_no, _test_con, _test_yard, _test_qty,_p
     #=========================3.去排入缸中，如果缸已滿，則是往下一層去找未滿的缸
     i=0
     k=0 
-    
+
     for i in range(0, len(_processing_cylinder_list)):
        _temp_cy_no=_processing_cylinder_list[i].get_cylinder_no()
        if _dispatched_cylinder==_temp_cy_no:
@@ -930,8 +930,7 @@ def groupList_to_clear_cylinder_jobtask(_pro_job_list, _cylinder_ptr_list, _cy_g
     
     group_list_size=0
     group_list_size=len(_rec_gp_list)
-    
-    
+
     index=0
     for index in range(len(_pro_job_list)):
         _pro_job_list[index].set_queue_full_flag(False)
@@ -967,7 +966,7 @@ def start_to_schedule_clear_cylinder_jobtask(_pro_joblist,_cy_ptr_list, _cy_grou
                    _total_jobtasks_list.append(_temp_tuple)
             else:
                 continue
-    #=================進行濃度: 淺 中 深 排序=====     
+    #=================進行濃度: 淺 中 深 排序=====
     global sorted_scheduled_list
     sorted_scheduled_list=[]
     sorted_scheduled_list=sorted(_total_jobtasks_list, key=operator.itemgetter(1))
@@ -1942,8 +1941,10 @@ def shutdown_manual_schedule_btns():#關閉手動排程按鈕: 輸入()，輸出
     
     
     #0118:先關手動排缸與輸出CSV按鈕
+    #0305:關閉最小清缸按鈕
     disable_button(btn4_1_auto_schedule)
     disable_button(btn4_2_hand_schedule)
+    disable_button(btn4_3_bad_schedule)
     disable_button(btn5_output_csv)
 #========================================
 def up_manual_schedule_btns():#開啟手動排程按鈕: 輸入()，輸出(開啟各按鈕功能)
@@ -2118,6 +2119,7 @@ def scheduler_to_dyeing():##: 輸入()，輸出(啟動主程式，目前包成�
     
     global btn4_1_auto_schedule
     global btn4_2_hand_schedule
+    global btn4_3_bad_schedule
     global btn_db_connection
     global btn_clean
     global btn5_output_csv
@@ -2137,7 +2139,7 @@ def scheduler_to_dyeing():##: 輸入()，輸出(啟動主程式，目前包成�
     
     
     #1110 此部分已經改為利用button4點一下執行排序跟排缸動作
-    btn4_1_auto_schedule = ttk.Button(frame, text="#自動排缸", command=lambda: [compare(jobtask_list, tree1), ProcessSchedulingOnCylinders(cylinder_list, jobtask_list),Switch_buttons(btn4_1_auto_schedule,btn4_2_hand_schedule)])
+    btn4_1_auto_schedule = ttk.Button(frame, text="#自動排缸", command=lambda: [compare(jobtask_list, tree1), ProcessSchedulingOnCylinders(cylinder_list, jobtask_list),Switch_buttons(btn4_1_auto_schedule,btn4_3_bad_schedule)])
     btn4_1_auto_schedule.place(x=5, y=45, width=150,height=40)
     #1214原為jobtask_list, 後改total_con_list
     #0105改為jobtask_list
@@ -2151,13 +2153,13 @@ def scheduler_to_dyeing():##: 輸入()，輸出(啟動主程式，目前包成�
     #0105 改為 _to_jobtask_list
     
     btn4_2_hand_schedule = ttk.Button(frame, text="開啟手排",command=lambda:  [exeute_manual_schedule_task(),Switch_buttons(btn4_2_hand_schedule,btn5_output_csv)])
-    btn4_2_hand_schedule .place(x=5, y=90, width=75,height=40)
+    btn4_2_hand_schedule .place(x=85, y=90, width=75,height=40)
     
    
    #start_to_schedule_clear_cylinder_jobtask(_pro_joblist,_cy_ptr_list, _cy_group_list)
    
-    btn4_3_bad_schedule = ttk.Button(frame, text="最小清缸",command=lambda:  groupList_to_clear_cylinder_jobtask(processing_cylinder_list,cy_ptr_list, cy_group_list))
-    btn4_3_bad_schedule .place(x=85, y=90, width=75,height=40)
+    btn4_3_bad_schedule = ttk.Button(frame, text="最小清缸",command=lambda:  [groupList_to_clear_cylinder_jobtask(processing_cylinder_list,cy_ptr_list, cy_group_list),Switch_buttons(btn4_3_bad_schedule,btn4_2_hand_schedule)])
+    btn4_3_bad_schedule .place(x=5, y=90, width=75,height=40)
     
    
    

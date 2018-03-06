@@ -126,7 +126,7 @@ def TestDBconnection(_server, _dbname, _user, _pass):#測試DB連線狀態
       
         with pyodbc.connect(connstr, timeout=1) as cnxn1:
             cursor1 = cnxn1.cursor()
-            test_set = cursor1.execute("select * from SL_DYEING").fetchall()
+            test_set = cursor1.execute("select * from SL_DYEING").fetchall() #fetchall():接收全部的返回结果行
         
         if len(test_set)!=0:
             connect_success=True
