@@ -4,7 +4,9 @@ from tkinter.messagebox import showinfo
 class config:
     def __init__(self):
         config_reader = configparser.ConfigParser()
-        config_reader.read('DB_config.ini')
+        #20180702   DB_config.ini設為絕對路徑
+        #config_reader.read('DB_config.ini')
+        config_reader.read('C:\\Users\\LinBlack\\PycharmProjects\\Schedule_SunLuen\\DB_config.ini')
         self.sever = config_reader.get('DB_connection', 'Server')
         self.database = config_reader.get('DB_connection', 'DataBase')
         self.user = config_reader.get('DB_connection', 'User')
@@ -22,21 +24,25 @@ class config:
     def modify(self,_rec_server, _rec_database, _rec_user, _rec_password):  
         config_writer= configparser.ConfigParser()
         config_writer.optionxform = str
-        config_writer.read('DB_config.ini')
+        #config_writer.read('DB_config.ini')
+        config_writer.read('C:\\Users\\LinBlack\\PycharmProjects\\Schedule_SunLuen\\DB_config.ini')
         config_writer.set('DB_connection','Server',_rec_server)
         config_writer.set('DB_connection','DataBase',_rec_database)
         config_writer.set('DB_connection','User',_rec_user)
         config_writer.set('DB_connection','Password',_rec_password)
-        with open('DB_config.ini', 'w') as configfile:
+        #with open('DB_config.ini', 'w') as configfile:
+        with open('C:\\Users\\LinBlack\\PycharmProjects\\Schedule_SunLuen\\DB_config.ini', 'w') as configfile:
            config_writer.write(configfile)
            showinfo("檔案狀態","儲存成功")
     #新增更新資料庫資料index筆數，讓下次排缸可以接續讀取       
     def update_record(self, _rec_record):
         config_writer= configparser.ConfigParser()
         config_writer.optionxform = str
-        config_writer.read('DB_config.ini')
+        #config_writer.read('DB_config.ini')
+        config_writer.read('C:\\Users\\LinBlack\\PycharmProjects\\Schedule_SunLuen\\DB_config.ini')
         config_writer.set('DB_record','Index',_rec_record)
-        with open('DB_config.ini', 'w') as configfile:
+        #with open('DB_config.ini', 'w') as configfile:
+        with open('C:\\Users\\LinBlack\\PycharmProjects\\Schedule_SunLuen\\DB_config.ini', 'w') as configfile:
            config_writer.write(configfile)
            showinfo("資料庫序號更新","儲存成功")
            
