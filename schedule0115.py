@@ -685,5 +685,27 @@ if __name__ == "__main__":
     mylog.error("Holy Shit")
 
 
+#config==============================================
+import json
+def read_config(config_path, mylog):    
+	try:        
+		with open(config_path) as json_data:            
+		config_ = json.load(json_data)        
+		return config_    
+	except Exception as e:        
+		mylog.error('load config error:')        
+		mylog.error_trace(e)        
+		mylog.error("Please check your config again!")        
+		raise
 
+def save_config(config_path, config, mylog):    
+	try:        
+		with open(config_path , 'w') as fp:            
+		json.dump(config, fp)        
+		return None   
+	except Exception as e:      
+		mylog.error('save config error:\n', e)        
+		mylog.error_trace(e)        
+		mylog.error("Please check your config again!")       
+		raise  
     
