@@ -707,5 +707,4 @@ def save_config(config_path, config, mylog):
 		mylog.error('save config error:\n', e)        
 		mylog.error_trace(e)        
 		mylog.error("Please check your config again!")       
-		raise  
-    
+		raise     
