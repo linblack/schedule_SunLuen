@@ -1,6 +1,5 @@
-
+# XGB_0416
 # coding: utf-8
-
 # In[1]:
 import xgboost as xgb
 from xgboost import plot_importance
@@ -528,3 +527,163 @@ def xgb_execution():##: 輸入()，輸出(啟動主程式，目前包成副函�
         output_train.to_csv('../../Output/{}/trainPredResult.csv'.format(vset), index=False)           
 #呼叫主函式    
 xgb_execution()
+
+
+#AVM_sample_code============================================================================
+from Read_path import Read_in_out
+from config import read_config
+from CreateLog import WriteLog
+
+import pandas as pd
+
+def sum_col(folder_path):
+    # get input, output path
+    IO_path = Read_in_out(folder_path)
+    input_path, output_path = IO_path.Read_in_out_path()
+    
+    # init log
+    mylog = WriteLog(output_path["log_path"], output_path["error_path"])
+    mylog.init_logger()
+    
+    # read config
+    config = read_config(input_path["config_path"], mylog)
+    
+    # read input file
+    try:
+        data = pd.read_csv(input_path["raw_path"])
+    except Exception as e:
+        mylog.error("Read raw data error")
+        mylog.error_trace(e)        
+    
+    # calculate sum
+    col = config["col"]
+    sum_ = data[col].sum()
+    
+    # record to log
+    mylog.info("the sum is "+str(sum_))
+    
+    return sum_
+
+if __name__ == "__main__":
+    path = "Cases/AVM_sample_dir/02_sum"
+    sum_col(path)
+
+    
+#Read_path===========================================================================
+# -*- coding: utf-8 -*-
+import json
+import os
+import traceback
+
+class Read_in_out:
+    def __init__(self, folder_path):
+        self.folder_path = folder_path
+        self.input_file_name = "input_file_path.json"
+        self.output_file_name = "output_file_path.json"
+        self.input_file_path = os.path.join(self.folder_path, self.input_file_name)
+        self.output_file_path = os.path.join(self.folder_path, self.output_file_name)
+    
+    def Read_json(self, path):
+        try:
+            with open(path) as json_data:
+                file = json.load(json_data)
+            return file
+    
+        except Exception as e:
+            print('load file error:\n', e)
+            path, _ = os.path.split(path)
+            err_path = os.path.join(path, "error.log")
+            with open(err_path, 'a') as file:
+                file.write('load file error:\n')
+                file.write(str(e))
+                file.write(traceback.format_exc())
+            raise
+            
+    def Read_in_out_path(self):
+        input_path = self.Read_json(self.input_file_path)
+        output_path = self.Read_json(self.output_file_path)
+        return input_path, output_path
+    
+    
+#CreateLog============================================================================
+# -*- coding: utf-8 -*-
+import logging
+import getpass
+
+class WriteLog(object):
+    def __init__(self, normal_log_path, error_log_path):
+        self.normal_log_path = normal_log_path
+        self.error_log_path = error_log_path
+        self.user=getpass.getuser()	#取得user[帳號]
+#        format='%(asctime)s - %(levelname)s - %(name)s: %(message)s'
+        format='%(asctime)s - %(levelname)s : %(message)s'
+        self.formatter=logging.Formatter(format)
+
+
+        
+    def setup_logger(self, name, log_path, level):
+        """Function setup as many loggers as you want"""
+        logger=logging.getLogger(name)
+        logger.setLevel(level)
+        if logger.handlers:
+            logger.handlers = []
+        
+        streamhandler=logging.StreamHandler()
+        streamhandler.setFormatter(self.formatter)
+        logger.addHandler(streamhandler)
+        filehandler=logging.FileHandler(log_path)
+        filehandler.setFormatter(self.formatter)
+        logger.addHandler(filehandler)
+        return logger
+    
+    def init_logger(self):
+        self.log = self.setup_logger("log", self.normal_log_path, logging.INFO)
+        self.err_log = self.setup_logger("err_log", self.error_log_path, logging.ERROR)
+
+    def debug(self, msg):
+        self.log.debug(msg)
+        
+    def info(self, msg):
+        self.log.info(msg)
+        
+    def warning(self, msg):
+        self.log.warning(msg)
+        
+    def error(self, msg):
+        self.log.error(msg)
+        self.err_log.error(msg)
+        
+    def critical(self, msg):
+        self.log.critical(msg)
+        self.err_log.critical(msg)
+        
+    def log(self, level, msg):
+        self.log.log(level, msg)
+        self.err_log.log(level, msg)
+        
+    def setLevel(self, log, level):
+        log.setLevel(level)
+
+    def disable(self):  # close output of log
+        logging.disable(50)
+        
+    def error_trace(self, msg):
+        self.log.error(msg,exc_info=True)
+        self.err_log.error(msg,exc_info=True)
+    
+    def warning_trace(self, msg):
+        self.log.warning(msg,exc_info=True)
+        self.err_log.warning(msg,exc_info=True)
+        
+        
+        
+if __name__ == "__main__":
+    mylog = WriteLog("./log.log", "./error.log")
+    mylog.init_logger()
+#    mylog.logger.info("GGGG")
+#    mylog.logger_error.error("NOOOOO")
+    mylog.error("Holy Shit")
+
+
+
+    
