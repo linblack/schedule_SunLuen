@@ -1264,3 +1264,305 @@ if __name__ == '__main__':
     Data_PreProcess_Train(path.path_03)
     
 ####################################################################################################################################   
+#DataImputation.py
+import numpy as np
+
+def ImputebySTD(dfs_, col_mean=None, col_median=None, col_std=None):
+
+    if col_mean is None:
+        col_mean = dfs_.mean()
+    if col_std is None:
+        col_std = dfs_.std()
+    if col_median is None:
+        col_median = dfs_.median()
+
+    impute_list = [col_mean, col_median]
+
+    ok_value = dfs_.loc[~dfs_.isna()]
+    na_amount = sum(dfs_.isna())
+
+    diff_std = []
+    for impute_value in impute_list:
+        new_std = np.append(np.array(ok_value), [impute_value] * na_amount).std()
+        diff_std.append(abs(col_std - new_std))
+
+    return impute_list[np.argmin(diff_std)]
+
+
+def GroupColCheck(dfs_, configs_):
+
+    if configs_['Data_Imputation']["Same"] == 1:
+        group_by_col = configs_['Merge_Category_Columns']['New_Columns']
+
+    elif configs_["Data_Imputation"]["Same"] == 0:
+        merge_col_list = configs_['Data_Imputation']['Group_List']
+        group_by_col = "_".join(merge_col_list)
+        dfs_[group_by_col] = dfs_[merge_col_list].apply(lambda x: '_'.join(x), axis=1)
+
+    return dfs_, group_by_col
+
+
+def DataImputation(dfs, configs):
+#    path = All_path(data_folders)
+
+    configs['Data_Imputation']['Imputation_List'] = {}
+    strategy = configs['Data_Imputation']['Strategy']
+
+    if configs['Data_Imputation']['Group_Mode'] == 0:
+        for col in dfs.columns:
+            if col in configs["Exclude_columns"]:
+                continue
+            configs['Data_Imputation']['Imputation_List'][col] = {}
+            configs['Data_Imputation']['Imputation_List'][col]["STD_CHECK"] = 0
+
+            if strategy in ["Mean", "Median"]:
+                if strategy == "Mean":
+                    impute_value = dfs[col].mean()
+                elif strategy == "Median":
+                    impute_value = dfs[col].median()
+
+                configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_VALUE'] = impute_value
+                if sum(dfs[col].isna()) != 0:
+                    dfs[col].fillna(impute_value, inplace=True)
+
+            elif strategy == "STD":
+                configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_Mean'] = dfs[col].mean()
+                configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_Median'] = dfs[col].median()
+                if sum(dfs[col].isna()) == 0:
+                    configs['Data_Imputation']['Imputation_List'][col]["STD_CHECK"] = 1
+                elif sum(dfs[col].isna()) != 0:
+                    impute_value = ImputebySTD(dfs[col])
+                    configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_VALUE'] = impute_value
+                    dfs[col].fillna(impute_value, inplace=True)
+
+        return dfs, configs, "OK"
+
+    elif configs['Data_Imputation']['Group_Mode'] == 1:
+        dfs, group_by_col = GroupColCheck(dfs, configs)
+
+        if strategy in ["Median"]:
+            for col in dfs.columns:
+                if col in configs["Exclude_columns"]:
+                    continue
+
+                if col == group_by_col:
+                    continue
+
+                configs['Data_Imputation']['Imputation_List'][col] = {}
+                col_median = dfs[col].median()
+                configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_VALUE'] = col_median
+
+                for cat_type in np.unique(dfs[group_by_col]):
+                    configs['Data_Imputation']['Imputation_List'][col][cat_type] = {}
+                    impute_value = col_median
+                    configs['Data_Imputation']['Imputation_List'][col][cat_type]["over30"] = 0
+                    if dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                    (~dfs[group_by_col].isna())].size > 30:
+                        impute_value = dfs[col].loc[(dfs[group_by_col] == cat_type)].median()
+                        configs['Data_Imputation']['Imputation_List'][col][cat_type]["over30"] = 1
+
+                    elif dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                      (~dfs[group_by_col].isna())].size < 30:
+                        print(col, cat_type, "NO impute by Group")
+
+                    configs['Data_Imputation']['Imputation_List'][col][cat_type]['DEFAULT_VALUE'] = impute_value
+                    dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+
+                if sum(dfs[col].isna()):
+                    dfs[col].fillna(col_median, inplace=True)
+                    print("ERROR")
+
+        elif strategy in ["Mean"]:
+            for col in dfs.columns:
+                if col in configs["Exclude_columns"]:
+                    continue
+
+                if col == group_by_col:
+                    continue
+                configs['Data_Imputation']['Imputation_List'][col] = {}
+                col_mean = dfs[col].mean()
+                configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_VALUE'] = col_mean
+
+                for cat_type in np.unique(dfs[group_by_col]):
+                    configs['Data_Imputation']['Imputation_List'][col][cat_type] = {}
+                    impute_value = col_mean
+                    configs['Data_Imputation']['Imputation_List'][col][cat_type]["over30"] = 0
+                    if dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                    (~dfs[group_by_col].isna())].size > 29:
+                        configs['Data_Imputation']['Imputation_List'][col][cat_type]["over30"] = 1
+                        impute_value = dfs[col].loc[(dfs[group_by_col] == cat_type)].col_mean()
+
+                    elif dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                      (~dfs[group_by_col].isna())].size < 30:
+                        print(col, cat_type, "NO impute by Group")
+
+                    configs['Data_Imputation']['Imputation_List'][col][cat_type]['DEFAULT_VALUE'] = impute_value
+                    dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+
+                if sum(dfs[col].isna()):
+                    dfs[col].fillna(col_mean, inplace=True)
+                    print("ERROR")
+
+        elif strategy in ["STD"]:
+            for col in dfs.columns:
+                if col in configs["Exclude_columns"]:
+                    continue
+
+                if col == group_by_col:
+                    continue
+
+                configs['Data_Imputation']['Imputation_List'][col] = {}
+                col_median = dfs[col].median()
+                col_mean = dfs[col].mean()
+                col_std = dfs[col].std()
+                configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_Mean'] = col_mean
+                configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_Median'] = col_median
+                configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_Median'] = col_std
+
+                for cat_type in np.unique(dfs[group_by_col]):
+                    configs['Data_Imputation']['Imputation_List'][col][cat_type] = {}
+                    configs['Data_Imputation']['Imputation_List'][col][cat_type]["over30"] = 0
+                    if dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                    (~dfs[group_by_col].isna())].size > 29:
+                        configs['Data_Imputation']['Imputation_List'][col][cat_type]["over30"] = 1
+                        cat_mean = dfs[col].loc[(dfs[group_by_col] == cat_type)].mean()
+                        cat_median = dfs[col].loc[(dfs[group_by_col] == cat_type)].median()
+                        configs['Data_Imputation']['Imputation_List'][col][cat_type]['DEFAULT_Mean'] = cat_mean
+                        configs['Data_Imputation']['Imputation_List'][col][cat_type]['DEFAULT_Median'] = cat_median
+                        if sum(dfs[col].loc[(dfs[col].isna())]) != 0:
+                            impute_value = ImputebySTD(dfs[col].loc[(dfs[group_by_col] == cat_type)])
+                            dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+                            configs['Data_Imputation']['Imputation_List'][col][cat_type]['DEFAULT_VALUE'] = impute_value
+
+                if sum(dfs[col].loc[(dfs[col].isna())]) != 0:
+                    impute_value = ImputebySTD(dfs[col])
+                    for cat_type in np.unique(dfs[group_by_col].loc[(dfs[col].isna())]):
+                        configs['Data_Imputation']['Imputation_List'][col][cat_type]['DEFAULT_VALUE'] = impute_value
+                    dfs[col].fillna(impute_value, inplace=True)
+
+            if configs["Data_Imputation"]["Same"] == 0:
+                dfs.drop(group_by_col, axis=1)
+
+        else:
+            return None
+
+
+        return dfs, configs, "OK"
+
+
+def TESTDataImputation(dfs, configs):
+#    path = All_path(data_folders)
+#    configs['Data_Imputation']['Imputation_List'] = {}
+    strategy = configs['Data_Imputation']['Strategy']
+
+    if configs['Data_Imputation']['Group_Mode'] == 0:
+        for col in dfs.columns:
+            if col in configs["Exclude_columns"]:
+                continue
+
+            if sum(dfs[col].isna()) == 0:
+                continue
+
+            if configs['Data_Imputation']['Imputation_List'][col]["STD_CHECK"] == 0:
+                impute_value = configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_VALUE']
+
+            elif configs['Data_Imputation']['Imputation_List'][col]["STD_CHECK"] == 1:
+                col_mean = configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_Mean']
+                col_median = configs['Data_Imputation']['Imputation_List'][col]['DEFAULT_Median']
+                impute_value = ImputebySTD(dfs[col], col_mean, col_median)
+
+            dfs[col].fillna(impute_value, inplace=True)
+
+    if configs['Data_Imputation']['Group_Mode'] == 1:
+        dfs, group_by_col = GroupColCheck(dfs, configs)
+        for col in dfs.columns:
+            if col in configs["Exclude columns"]:
+                continue
+
+            if col == group_by_col:
+                continue
+
+            if sum(dfs[col].isna()) == 0:
+                continue
+
+            if strategy in ["Mean", "Median"]:
+                for cat_type in np.unique(dfs[group_by_col].loc[(dfs[col].isna())]):
+                    impute_value = configs['Data Imputation']['Imputation List'][col][cat_type]['DEFAULT_VALUE']
+                    dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+
+            elif strategy in ["STD"]:
+                for cat_type in np.unique(dfs[group_by_col].loc[(dfs[col].isna())]):
+                    if configs['Data_Imputation']['Imputation_List'][col][cat_type]["over30"] == 0:
+                        impute_value = configs['Data Imputation']['Imputation List'][col][cat_type]['DEFAULT_VALUE']
+                        dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+
+                    elif configs['Data_Imputation']['Imputation_List'][col][cat_type]["over30"] == 1:
+                        try:
+                            impute_value = configs['Data Imputation']['Imputation List'][col][cat_type]['DEFAULT_VALUE']
+                            dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+
+                        except:
+                            cat_mean = configs['Data_Imputation']['Imputation_List'][col][cat_type]['DEFAULT_Mean']
+                            cat_median = configs['Data_Imputation']['Imputation_List'][col][cat_type]['DEFAULT_Median']
+                            impute_value = ImputebySTD(dfs[col].loc[(dfs[group_by_col] == cat_type)],
+                                                       cat_mean,
+                                                       cat_median)
+                            dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+
+
+        if configs["Data_Imputation"]["Same"] == 0:
+            dfs.drop(group_by_col, axis=1)
+
+
+    error_msgs = "OK"
+    return dfs, error_msgs
+
+#############################################################################################################################
+#DataTransform.py
+def DataTransform(dfs, configs):
+
+#    path = All_path(data_folders)
+    strategy = configs['Data_Transform']['Strategy']
+
+    if configs['Data_Transform']['Group_Mode'] == 0:
+        if strategy == "Z_Scale":
+            configs['Data_Transform']['Z_Scale'] = {}
+            for col in dfs.columns:
+                if col in configs["Exclude_columns"]:
+                    continue
+#                print("Hello-1")
+                configs['Data_Transform']['Z_Scale'][col] = {}
+                col_std = dfs[col].std()
+                col_mean = dfs[col].mean()
+                configs['Data_Transform']['Z_Scale'][col]['Std'] = col_std
+                configs['Data_Transform']['Z_Scale'][col]['Mean'] = col_mean
+                if col_std == .0:
+                    dfs[col] = dfs[col].transform(lambda x: x - x.mean())
+                elif col_std != .0:
+                    dfs[col] = dfs[col].transform(lambda x: (x - x.mean()) / (x.std()))
+                    
+    return dfs, configs
+
+
+def TESTDataTransform(dfs, configs):
+
+#    path = All_path(data_folders)
+    strategy = configs['Data_Transform']['Strategy']
+
+    if configs['Data_Transform']['Group_Mode'] == 0:
+        if strategy == "Z_Scale":
+            for col in dfs.columns:
+                if col in configs["Exclude_columns"]:
+                    continue
+
+                col_std =configs['Data_Transform']['Z_Scale'][col]['Std']
+                col_mean = configs['Data_Transform']['Z_Scale'][col]['Mean']
+
+                if col_std != .0:
+                    dfs[col] = dfs[col].transform(lambda x: (x - col_mean) / col_std)
+                elif col_std == .0:
+                    dfs[col] = dfs[col].transform(lambda x: x - col_mean)
+
+    return dfs
+
+#############################################################################################
