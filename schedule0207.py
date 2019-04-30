@@ -883,6 +883,384 @@ if __name__ == "__main__":
     mylog.error("Holy Shit")
 
 ######################################################
+#Data_PreProcess.py
+import pandas as pd
+import datetime
+import math
+import os
+from sklearn.model_selection import train_test_split
+from config import read_config, save_config
+from DataImputation import DataImputation, TESTDataImputation
+from DataTransform import DataTransform, TESTDataTransform
+from CreateLog import WriteLog
+from Read_path import read_path
+
+def CHECKCol(dfs_, col_list_):
+
+    list_not_exists = []
+    list_missings = []
+    for col in col_list_:
+        # check Merge col status (Exist Check)
+        if col not in dfs_.columns:
+            list_not_exists.append(col)
+            continue
+
+        # check Merge col status (Missing Check)
+        if sum(dfs_[col].isna()) != 0:
+            list_missings.append(col)
+
+    return list_not_exists, list_missings
 
 
-   
+def CheckCatCol(dfs, configs, mylog):
+    check_list = set()
+
+    # the code presume the group list is not empty if the user choose group related function
+    if "MergeCatCol" in configs["Preprocess_Step"]:
+        check_list = check_list | set(configs["Merge_Category_Columns"]["Group_List"])
+
+    if ("DataImpute" in configs["Preprocess_Step"]) & (configs["Data_Imputation"]["Group_Mode"] == 1):
+        check_list = check_list | set(configs["Data_Imputation"]["Group_List"])
+
+    if ("DataTrans" in configs["Preprocess_Step"]) & (configs["Data_Transform"]["Group_Mode"] == 1):
+        check_list = check_list | set(configs["Data_Transform"]["Group_List"])
+
+    if len(check_list) == 0:
+        mylog.info("**Category Columns Check Passed**")
+        return "OK"
+
+    elif len(check_list) != 0:
+        list_miss, list_not_exist = CHECKCol(dfs, check_list)
+
+        if len(list_not_exist) + len(list_miss) == 0:
+            return "OK"
+
+        if len(list_not_exist) != 0:
+            col_str = ', '.join(list_not_exist)
+            mylog.error("The Following Columns don't exist: " + col_str)
+
+        if len(list_miss) != 0:
+            col_str = ', '.join(list_miss)
+            mylog.error("The Following Columns exist missing value:" + col_str)
+
+        return "NG"
+
+
+def preSortGroupCol(configs):
+
+    if "MergeCatCol" in configs["Preprocess_Step"]:
+        configs["Merge_Category_Columns"]["Group_List"].sort()
+
+    if ("DataImpute" in configs["Preprocess_Step"]) & (configs["Data_Imputation"]["Group_Mode"] == 1):
+        configs["Data_Imputation"]["Same"] = 0
+        configs["Data_Imputation"]["Group_List"].sort()
+        if "MergeCatCol" in configs["Preprocess_Step"]:
+            if configs["Merge_Category_Columns"]["Group_List"] == configs["Data_Imputation"]["Group_List"]:
+                configs["Data_Imputation"]["Same"] = 1
+
+    if ("DataTrans" in configs["Preprocess_Step"]) & (configs["Data_Transform"]["Group_Mode"] == 1):
+        configs["Data_Transform"]["Same"] = 0
+        configs["Data_Transform"]["Group_List"].sort()
+        if "MergeCatCol" in configs["Preprocess_Step"]:
+            if configs["Merge_Category_Columns"]["Group_List"] == configs["Data_Transform"]["Group_List"]:
+                configs["Data_Transform"]["Same"] = 1
+
+    return configs
+
+
+def DataSplit(dfs, configs, output_path):
+    if configs["Train_Test_Split"]["Assign_Spilt_Amount_Mode"] == 1:
+        test_amount_ = configs["Train_Test_Split"]["testing_Amount"]
+        dfs_train = dfs.iloc[:-test_amount_]
+        dfs_test = dfs.iloc[-test_amount_:]
+#        print(dfs_train.shape, dfs_test.shape)
+
+    elif configs["Train_Test_Split"]["Assign_Spilt_Amount_Mode"] == 0:
+        dfs_train, dfs_test = train_test_split(dfs,
+                                               test_size=configs["Train_Test_Split"]["Parameter_Test_Rate"],
+                                               shuffle=configs["Train_Test_Split"]["Setting_Random_Mode"] == 1)
+#    print(path.data_train_path)
+    dfs_train.to_csv(output_path["data_train_path"], index=False)
+    dfs_test.to_csv(output_path["data_test_path"], index=False)
+    return dfs_train, dfs_test
+
+
+def removeObjectCol(dfs, configs, mylog):
+    ori_columns = dfs.columns
+    configs['Remove_Nonnumerical_Columns']["Time_Columns"] = []
+    for col in ori_columns:
+        if col in configs["Exclude_columns"]:
+            continue
+
+        if dfs[col].dtypes == 'object':
+            try:
+                dfs[col] = pd.to_datetime(dfs[col], format='%Y-%m-%d %H:%M:%S.%f')
+                if configs['Remove_Nonnumerical_Columns']["Setting_Transform_Time_to_Seconds"] == 1:
+#                    dfs[col] = dfs[col].apply(lambda x: transform2Second(x))
+                    dfs[col] = dfs[col].apply(transform2Second, mylog=mylog)
+                    configs['Remove_Nonnumerical_Columns']["Time_Columns"].append(col)
+
+                elif configs['Remove_Nonnumerical_Columns']["Setting_Transform_Time_to_Seconds"] == 0:
+                    configs["Exclude_columns"].append(col)
+                    configs['Remove_Nonnumerical_Columns']["Time_Columns"].append(col)
+            except:
+                dfs = dfs.drop(col, axis=1)
+                continue
+    new_columns = dfs.columns
+    # print(set(ori_columns) - set(new_columns))
+    configs['Remove_Nonnumerical_Columns']["Remove_Nonnumerical_Columns"] = list(set(ori_columns) - set(new_columns))
+    return dfs, configs
+
+
+def TESTremoveObjectCol(dfs, configs, mylog):
+#    print(configs['Remove_Nonnumerical_Columns']["Remove_Nonnumerical_Columns"])
+    for col in configs['Remove_Nonnumerical_Columns']["Remove_Nonnumerical_Columns"]:
+        try:
+            dfs = dfs.drop(col, axis=1)
+        except Exception as e:
+            mylog.warning("Data PreProcess (Test): Cannot drop the nonnumerical feature: "+str(col))
+
+    for col in configs['Remove_Nonnumerical_Columns']["Time_Columns"]:
+        try:
+            dfs[col] = pd.to_datetime(dfs[col], format='%Y-%m-%d %H:%M:%S.%f')
+            if configs['Remove_Nonnumerical_Columns']["Setting_Transform_Time_to_Seconds"] == 1:
+                dfs[col] = dfs[col].apply(transform2Second, mylog=mylog)
+        except Exception as e:
+            mylog.error("Data PreProcess (Test): CAN NOT TRANSFORM TIME TO SECOND: "+ str(col))
+            mylog.error_trace(e)
+            raise
+
+    return dfs
+
+
+def transform2Second(x, mylog):
+    if pd.isnull(x):
+        return math.nan
+    else:
+        try:
+            return float((x - datetime.datetime(1970, 1, 1)).total_seconds())
+        except Exception as e:
+            mylog.warning("Cannot transform datatime to second")
+            mylog.warning('x:', x)
+            mylog.warning_trace(e)
+            return math.nan
+
+
+def removeMissingCol(dfs, configs):
+    threshold = dfs.shape[0] * configs["Remove_Missing_Value"]["Threshold"]
+    remove_cols = [c for c in dfs.columns if sum(dfs[c].isnull()) >= threshold]
+    configs['Remove_Missing_Value']["Remove_Missing_Columns"] = remove_cols
+    dfs = dfs.drop(remove_cols, axis=1)
+    return dfs, configs
+
+
+def TESTremoveMissingCol(dfs, configs):
+    for col in configs['Remove_Missing_Value']["Remove_Missing_Columns"]:
+        try:
+            dfs = dfs.drop(col, axis=1)
+        except:
+            print("Data PreProcess (Test): Cannot drop cols missing in training data: \n", col)
+
+    return dfs
+
+
+def mergeCategoryCol(dfs, configs):
+
+#    print(configs['Merge_Category_Columns'])
+    merge_col_list = configs['Merge_Category_Columns']['Group_List']
+
+    new_col_name = "_".join(merge_col_list)
+    dfs[new_col_name] = dfs[merge_col_list].apply(lambda x: '_'.join(x), axis=1)
+    configs['Merge_Category_Columns']['New_Columns'] = new_col_name
+    configs["Exclude_columns"].append(new_col_name)
+
+    return dfs, configs
+
+
+def TESTmergeCategoryCol(dfs, configs):
+
+    merge_col_list = configs['Merge_Category_Columns']['Group_List']
+    new_col_name = "_".join(merge_col_list)
+    dfs[new_col_name] = dfs[merge_col_list].apply(lambda x: '_'.join(x), axis=1)
+
+    return dfs
+
+
+def Data_PreProcess_Train(folder_path):
+    #### 
+    output_path={}
+    output_path["data_train_path"] = os.path.join(folder_path, 'Data_Train.csv')
+    output_path["data_test_path"] = os.path.join(folder_path, 'Data_Test.csv')
+    output_path["x_train_path"] = os.path.join(folder_path, 'x_Train.csv')
+    output_path["x_test_path"] = os.path.join(folder_path, 'x_Test.csv')
+    output_path["y_train_path"] = os.path.join(folder_path, 'y_Train.csv')
+    output_path["y_test_path"] = os.path.join(folder_path, 'y_Test.csv')    
+    ####
+    input_path = read_path(folder_path)
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    mylog.init_logger()
+    config = read_config(input_path["config_path"], mylog)
+
+    # Put in Y
+    tmp = config["Exclude_columns"]
+    tmp.extend(config["Y"])
+    config["Exclude_columns"] = tmp
+    
+    mylog.info("-----Data PreProcess (Train)-----")
+
+    try:
+        df_train = pd.read_csv(input_path["raw_path"])
+    except Exception as e:
+        mylog.error('Data PreProcess (Train): Error while loading training data ')
+        mylog.error_trace(e)
+        raise
+
+    try:
+        df_train = df_train.drop(config['ParamReview']['RemoveInReview'], axis=1)
+
+    except Exception as e:
+        mylog.warning('Data PreProcess (Train): Cannot drop features assigned in Parameter Review')
+        mylog.warning_trace(e)
+
+
+    if CheckCatCol(df_train, config, mylog) == "NG":
+        mylog.critical("Please contact Peter to solve the problem")
+        raise
+
+    config = preSortGroupCol(config)
+
+    # TRAIN STEP
+    mylog.info("**TRAINING PROCESS START**")
+    for step_index in config['Preprocess_Step']:
+        if step_index == "DataSplit":
+            df_train, df_test = DataSplit(df_train, config, output_path)
+
+        if step_index == "DelNonNumCol":
+            mylog.info("Remove_Nonnumerical_Columns")
+            df_train, config = removeObjectCol(df_train, config, mylog)
+        elif step_index == "DelMissingCol":
+            mylog.info("Remove_Missing_Value")
+            df_train, config = removeMissingCol(df_train, config)
+        elif step_index == "MergeCatCol":
+            mylog.info("Merge_Category_Columns")
+            df_train, config = mergeCategoryCol(df_train, config)
+        elif step_index == "DataImpute":
+            mylog.info("Data Imputation")
+            df_train, config, error_msg = DataImputation(df_train, config)
+            if error_msg != "OK":
+                mylog.error("Data Process Interrupted")
+                mylog.error_trace(error_msg)
+                raise
+        elif step_index == "DataTrans":
+            mylog.info("Data Transform")
+            df_train, config = DataTransform(df_train, config)
+
+    df_train[config["Exclude_columns"]].to_csv(output_path["y_train_path"], index=False)
+    df_train.drop(config["Y"], axis=1).to_csv(output_path["x_train_path"], index=False)
+
+    # remove Y
+    tmp = config["Exclude_columns"]
+    tmp.remove(config["Y"][0])
+    config["Exclude_columns"] = tmp
+    save_config(input_path["config_path"],config, mylog)
+    
+    mylog.info("-----Data PreProcess (Train) Finished-----")
+
+    return None
+
+def Data_PreProcess_Test(folder_path):
+    #### 
+    output_path={}
+    output_path["data_train_path"] = os.path.join(folder_path, 'Data_Train.csv')
+    output_path["data_test_path"] = os.path.join(folder_path, 'Data_Test.csv')
+    output_path["x_train_path"] = os.path.join(folder_path, 'x_Train.csv')
+    output_path["x_test_path"] = os.path.join(folder_path, 'x_Test.csv')
+    output_path["y_train_path"] = os.path.join(folder_path, 'y_Train.csv')
+    output_path["y_test_path"] = os.path.join(folder_path, 'y_Test.csv')    
+    ####
+    input_path = read_path(folder_path)
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    mylog.init_logger()
+    config = read_config(input_path["config_path"], mylog)
+
+    # Put in Y
+    tmp = config["Exclude_columns"]
+    tmp.extend(config["Y"])
+    config["Exclude_columns"] = tmp
+
+    try:
+        df_test = pd.read_csv(output_path["data_test_path"])
+    except Exception as e:
+        mylog.error("Data PreProcess (Test): Error while loading testing data ")
+        mylog.error_trace(e)
+        raise
+        
+    mylog.info("-----Data PreProcess (Test)-----")
+
+    for col in config['ParamReview']['RemoveInReview']:
+        try:
+            df_test = df_test.drop(col, axis=1)
+        except Exception as e:
+            mylog.warning('Data PreProcess (Test): Cannot drop features assigned in Parameter Review')
+            mylog.warning_trace(e)
+
+    if CheckCatCol(df_test, config, mylog) == "NG":
+        mylog.critical("Please contact Peter to solve the problem")
+        raise
+
+    # TEST STEP
+    mylog.info("**TESTING PROCESS START**")
+    for step_index in config['Preprocess_Step']:
+        if step_index == "DelNonNumCol":
+            mylog.info("Remove_Nonnumerical_Columns")
+            df_test = TESTremoveObjectCol(df_test, config, mylog)
+        elif step_index == "DelMissingCol":
+            mylog.info("Remove_Missing_Value")
+            df_test = TESTremoveMissingCol(df_test, config)
+        elif step_index == "MergeCatCol":
+            mylog.info("Merge_Category_Columns")
+            df_test = TESTmergeCategoryCol(df_test, config)
+        elif step_index == "DataImpute":
+            mylog.info("Data Imputation")
+            df_test, error_msg = TESTDataImputation(df_test, config)
+            if error_msg != "OK":
+                mylog.error("Data Process Interrupted")
+                mylog.error_trace(error_msg)
+                return
+        elif step_index == "DataTrans":
+            mylog.info("Data Transform")
+            df_test = TESTDataTransform(df_test, config)
+
+    df_test[config["Exclude_columns"]].to_csv(output_path["y_test_path"], index=False)
+    df_test.drop(config["Y"], axis=1).to_csv(output_path["x_test_path"], index=False)
+
+    # remove Y
+    tmp = config["Exclude_columns"]
+    for y in config["Y"]:
+        tmp.remove(y)
+    config["Exclude_columns"] = tmp
+    save_config(input_path["config_path"],config, mylog)
+    mylog.info("-----Data PreProcess (Test) Finished-----")
+    
+    return None
+
+if __name__ == '__main__':
+
+#    input_folder = '../data/'
+#    folder_list = [input_folder + name + '/' for name in os.listdir(input_folder) if os.path.isdir(os.path.join(input_folder, name))]
+#    print('Total log folders:', folder_list, "\n")
+#
+#    for folder_name in folder_list:
+#
+#        print('Pre-process Start', folder_name)
+#
+#        Data_PreProcess_Train(folder_name)
+#        Data_PreProcess_Test(folder_name)
+    from Path import All_path
+    base_path = os.path.join("../Cases", "CVD2E_Split1_Test")
+    path = All_path(base_path)
+    path.dir_init()
+    print("Data Preprocess")
+    Data_PreProcess_Train(path.path_03)
+    
+####################################################################################################################################   
