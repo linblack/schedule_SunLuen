@@ -3951,3 +3951,3312 @@ if __name__ == "__main__":
     path = "../Cases/PSH_Demo/PSH_00/00/08_CI/"
     MXCI_MYCI_offline(path)
 
+#-------------------------------------------------------------------------------------------------------------
+#MXCI_MYCI_pre.py
+# -*- coding: utf-8 -*-
+import pandas as pd
+from Formula import integrand
+from scipy.integrate import quad
+import numpy as np
+from Read_path import read_path
+from sklearn.externals import joblib
+from config import read_config, save_config
+from CreateLog import WriteLog
+import os
+from json2csv import json2csv
+import matplotlib.pyplot as plt
+
+
+def pre_MXCI_MYCI(data_folder):
+    ####### output path #######
+    output_path = {}
+    output_path["MXCI_fig_path"] = os.path.join(data_folder, "MXCI_offline.png")
+    output_path["MYCI_fig_path"] = os.path.join(data_folder, "MYCI_offline.png")
+    output_path["light_fig_path"] = os.path.join(data_folder, "MXCI_MYCI_light_offline.png")
+    output_path["MXCI_MYCI_offline_path"] = os.path.join(data_folder, "MXCI_MYCI_offline.csv")
+    output_path["MXCI_x_train_path"] = os.path.join(data_folder, "MXCI_x_train.pkl")
+    output_path["CI_config_path"] = os.path.join(data_folder, "CI_config.json")
+    ############################
+    
+    input_path = read_path(data_folder)
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    # mylog.init_logger()
+    config = read_config(input_path["config_path"], mylog)
+    mylog.info("-----MXCI_MYCI preparation-----")
+
+    try:        
+        x_train = pd.read_csv(input_path["x_train_path"])
+        y_pred_merge_train = pd.read_csv(input_path["y_pred_merge_train"])
+    except Exception as e:
+        mylog.error("pre-MXCI MYCI calculation: Error while read training data")
+        mylog.error_trace(e)
+        return "NG", "Please contact APC team to solve the problem."
+        # raise
+
+    # MXCI
+    try:
+        filter_feature = config["Filter_Feature"]
+        add_exclude_feature = config["pre_CI"]["add_exclude_feature"]
+    except Exception as e:
+        mylog.error("pre-MXCI MYCI calculation (MXCI): Error while reading parameters in config")
+        mylog.error_trace(e)
+        return "NG", "Please contact APC team to solve the problem."
+        # raise
+
+    try:
+        exlude_list = config["IDX"].copy()
+        ex_list = preMXCI(x_train, exlude_list, mylog, filter_feature, output_path["MXCI_x_train_path"], add_exclude_feature)
+        CI_config = {}
+        CI_config['MXCI_exclude_list'] = ex_list
+    except Exception as e:
+        mylog.error("pre-MXCI MYCI calculation: Error while loading parameters from preMXCI")
+        mylog.error_trace(e)
+        return "NG", "Please contact APC team to solve the problem."
+        # raise
+
+    # MYCI
+    try:
+        CI_config['MYCI'] = {}
+        for ture_Y in config["Y"]:
+            Model1 = config["Model_Selection"][ture_Y]["Predict_Model"]
+            Model2 = config["Model_Selection"][ture_Y]["Baseline_Model"]
+            RI_info = preMYCI(y_pred_merge_train, ture_Y, Model1, Model2, mylog, filter_feature)
+            CI_config['MYCI'][ture_Y] = RI_info
+    except Exception as e:
+        mylog.error("pre-MXCI MYCI calculation (MYCI): Error while calculating preMYCI")
+        mylog.error_trace(e)
+        return "NG", "Please contact APC team to solve the problem."
+        # raise
+
+    save_config(input_path["config_path"], config, mylog)
+    save_config(output_path["CI_config_path"], CI_config, mylog)
+
+    json2csv(input_path["config_path"])
+    json2csv(output_path["CI_config_path"])
+
+    mylog.info("-----Pre-MXCI/MYCI Calculation Done-----")
+    return "OK", None
+
+
+def preMYCI(df_y, ture_Y, Model1, Model2 , mylog, filter_feature):
+    df_y_c = df_y.copy()
+
+    MYCI_dict = {}
+    if filter_feature:
+        filter_feature_list = df_y_c[filter_feature].unique().tolist()
+
+        for feature in filter_feature_list:
+            mylog.info("---MYCI info:" + filter_feature + "  " + str(feature) + " ---")
+            try:
+                df_y_c_few = df_y_c.loc[df_y_c[filter_feature] == feature].reset_index(drop=True)
+            except Exception as e:
+                mylog.error("pre-MYCI calculation: Error while selecting feature in y.")
+                mylog.error("Please check if feature exists in the prediction result.")
+                mylog.error_trace(e)
+                raise
+            # print(df_y_c_few.head())
+            MYCI_dict[feature] = preMYCI_2(df_y_c_few, ture_Y, Model1, Model2, mylog)
+        return MYCI_dict
+
+    else:
+        mylog.info("---MYCI info---")
+        MYCI_dict["NoGroup"] = preMYCI_2(df_y_c, ture_Y, Model1, Model2, mylog)
+        return MYCI_dict
+
+
+def preMYCI_2(df_y, ture_Y, Model1, Model2 , mylog):
+    try:
+        y_mean = df_y[ture_Y].mean()
+        y_std = df_y[ture_Y].std()
+        
+        y_model_1 = df_y[ture_Y+"_pred_"+Model1]
+        y_model_2 = df_y[ture_Y+"_pred_"+Model2]
+
+    except Exception as e:
+        mylog.error("pre-MYCI calculation: Error while reading y_train table ")
+        mylog.error_trace(e)
+        raise    
+
+    y_model_1_scaled = (y_model_1-y_mean)/y_std
+    y_model_2_scaled = (y_model_2-y_mean)/y_std
+    RI_train = []
+    for i in range(len(y_model_1_scaled.values.tolist())):
+        RI_train.append(quad(integrand, (y_model_1_scaled[i]+y_model_2_scaled[i])/2 , np.inf, args=(y_model_1_scaled[i],y_model_2_scaled[i]))[0])
+
+    # print(RI_train)
+    RI_T = min(RI_train)
+    # print(RI_T)
+
+    mylog.info("mean: "+str(y_mean))
+    mylog.info("std: "+str(y_std))
+    mylog.info("Threshold: "+str(RI_T))
+    preMYCI_dict = dict()
+    preMYCI_dict["RI_T"] = RI_T
+    preMYCI_dict["y_mean"] = y_mean
+    preMYCI_dict["y_std"] = y_std
+    return preMYCI_dict
+
+
+def split_MXCI_train_path(MXCI_x_train_path):
+    dirname, basename = os.path.split(MXCI_x_train_path)
+    base, ext = os.path.splitext(basename)
+    return dirname, base, ext
+
+
+def get_MXCI_train_path(dirname, base, ext, filter_feature, feature):
+    return os.path.join(dirname, base+"_"+filter_feature+"_"+str(feature)+ext)
+
+
+def preMXCI(x_train, exlude_list, mylog, filter_feature, MXCI_x_train_path, add_exclude_feature):
+    df_train_drop = x_train.copy()
+    MXCI_exclude_dict = {}
+    if filter_feature:
+        try:
+            filter_feature_list = df_train_drop[filter_feature].unique().tolist()
+            filter_feature_list.sort()
+        except Exception as e:
+            mylog.error("pre-MXCI calculation: Error while selecting feature in x.")
+            mylog.error("Please check if feature exists in the x data.")
+            mylog.error_trace(e)
+            raise
+        try:
+            dirname, base, ext = split_MXCI_train_path(MXCI_x_train_path)
+            for feature in filter_feature_list:
+                mylog.info("---MXCI info: " + filter_feature + "  " + str(feature) + " ---")
+                df_train = df_train_drop.loc[df_train_drop[filter_feature] == feature].copy().reset_index(drop=True)
+                MXCI_exclude_list, df_drop = preMXCI_2(df_train, exlude_list, mylog, add_exclude_feature)
+                MXCI_exclude_dict[feature] = MXCI_exclude_list
+                joblib.dump(df_drop, get_MXCI_train_path(dirname, base, ext, filter_feature, feature))
+        except Exception as e:
+            mylog.error("pre-MXCI calculation: Error while calculating MXCI_exclude_list.")
+            mylog.error_trace(e)
+            raise
+        return MXCI_exclude_dict
+
+    else:
+        mylog.info("---MXCI info---")
+        try:
+            MXCI_exclude_list ,df_drop = preMXCI_2(df_train_drop, exlude_list, mylog, add_exclude_feature)
+            MXCI_exclude_dict["NoGroup"] = MXCI_exclude_list
+        except Exception as e:
+            mylog.error("pre-MXCI calculation: Error while calculating MXCI_exclude_list.")
+            mylog.error_trace(e)
+            raise
+        joblib.dump(df_drop, MXCI_x_train_path)
+        return MXCI_exclude_dict
+
+
+def preMXCI_2(x_train, ex_list, mylog, add_exclude_feature):
+    df_train = x_train.copy()
+    df_train_size = df_train.shape
+
+    exlude_list = ex_list.copy()
+    if add_exclude_feature:
+        exlude_list.extend(add_exclude_feature)
+    for exclude in exlude_list:
+        if exclude in x_train.columns:
+            df_train = df_train.drop([exclude], axis=1)
+
+    # drop the constant cols
+    constant_col = []
+    cols = df_train.columns
+    for col in cols:
+        if len(df_train[col].unique().tolist()) == 1:
+            constant_col.append(col)
+    if constant_col:
+        df_const = df_train[constant_col]
+        df_train = df_train.drop(constant_col, axis=1)
+
+    # correlation coef filter
+    coef = 0.7
+    R = df_train.corr().values
+    df_R = pd.DataFrame(data=R)
+    param_size = len(df_train.columns.tolist())
+    remove_list = []
+
+    for i in range(param_size):
+        idx = df_R[i].loc[abs(df_R[i]) > coef].index.tolist()
+        idx.remove(i)
+        remove_list.extend(idx)
+    remove_list = list(set(remove_list))
+    #    print("length of removal list", len(remove_list))
+    #    print("number of left params", len(df_R.index)-len(remove_list))
+    remove_index = df_train.columns[[remove_list]].tolist()
+    df_train = df_train.drop(columns=remove_index, axis=1)
+    if constant_col:
+        df_train = pd.concat([df_train, df_const], axis=1)
+
+    mylog.info("Exluded features (" + str(len(exlude_list)) + "):")
+    mylog.info(",".join(str(e) for e in exlude_list))
+    mylog.info("Constant features(" + str(len(constant_col)) + "):")
+    mylog.info(",".join(str(e) for e in constant_col))
+    mylog.info("Highly correlated features (" + str(len(remove_index)) + "):")
+    mylog.info(",".join(str(e) for e in remove_index))
+    # mylog.info("Total number of excluded list: " + str(len(exlude_list) + len(constant_col) + len(remove_index)))
+    mylog.info("Total number of excluded list: " + str(len(exlude_list) + len(remove_index)))
+    mylog.info("Size of the original data: " + str(df_train_size))
+    mylog.info("Size of the left data: " + str(df_train.shape))
+    if df_train.shape[1] == 0:
+        mylog.warning("There is no feature left. MXCI cannot work properly.")
+
+    MXCI_exclude_list = exlude_list
+    # MXCI_exclude_list.extend(constant_col)
+    MXCI_exclude_list.extend(remove_index)
+
+    return MXCI_exclude_list, df_train
+
+
+if __name__ == "__main__":
+    # path = "../Cases/CVD2E_Split1_Test/CVD2E_Split1_Test_00/00/08_CI/"
+    path = "../Cases/PSH_Demo/PSH_00/00/08_CI/"
+    pre_MXCI_MYCI(path)
+
+#---------------------------------------------------------------------------------------------------------------------
+#Path.py
+# -*- coding: utf-8 -*-
+import os, json
+import traceback
+from shutil import copyfile
+
+class All_path():
+    def __init__(self, root, config_file, path_config=None):
+        self.root = root
+        self.root_name = os.path.basename(os.path.abspath(self.root))
+        norm_root = os.path.normpath(self.root)
+        self.up_root = os.path.split(norm_root)[0]
+        self.raw_data_default_name = "raw_data.csv"
+        self.config_default_name = "config.json"
+        self.sys_log_default_name = "System.log"
+        self.config_file = config_file
+        self.sub_path = ["00_Model_building", "01_Test", "02_Merge", "03_Test"]
+        self.model_steps = ["00_Parameter_tuning", "01_Model_building", "02_Prediction",
+                            "03_Merge_Parameter_tuning", "04_Merge_Model_building", "05_Prediction"]
+        self.structure_list = ["00_Config/", "01_OriginalData/", "02_DataPreview/", "03_PreprocessedData/", "04_XDI/",
+                               "05_YDI/", "06_Model/", "07_SelectModel/", "08_CI/", "99_LOG/"]
+        self.select_model_dir = ["00_Training", "01_Merge"]
+        self.retrain_digit = str(4)
+        self.retrain_format = "{0:0" + self.retrain_digit + "d}"
+
+        try:
+            with open(self.config_file) as json_data:
+                config = json.load(json_data)
+        except Exception as e:
+            error_path = os.path.join(self.root, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading config file\n")
+                file.write(str(e) + "\n")
+                file.write(traceback.format_exc())
+                raise
+
+        try:
+            self.model_pred_name = config["Model_Pred_Name"]
+        except Exception as e:
+            error_path = os.path.join(self.root, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading 'Model_Pred_Name' in config\n")
+                file.write(str(e) + "\n")
+                file.write(traceback.format_exc())
+                raise
+
+        if path_config is None:
+            self.path_config = {}
+
+        else:
+            self.path_config = path_config
+
+        if self.root_name not in self.path_config:
+            self.path_config[self.root_name] = {}
+            self.path_config[self.root_name]["main"] = self.root
+
+##############################################################################################################
+    def get_current_retrain_number(self):
+        retrain_list = []
+        for filename in os.listdir(self.root):
+            if os.path.isdir(os.path.join(self.root, filename)):
+                retrain_list.append(filename)
+        retrain_list = [dir[-2:] for dir in retrain_list if self.root_name in dir]
+        if retrain_list:
+            retrain_list = list(map(int, retrain_list))
+            return max(retrain_list)
+        else:
+            return None
+
+
+    def get_current_batch_number(self, retrain_folder_path):
+        batch_list = os.listdir(retrain_folder_path)
+        if batch_list:
+            batch_list = list(map(int, batch_list))
+            return max(batch_list)
+        else:
+            return None
+
+
+    def retrain_check(self):
+        num = self.get_current_retrain_number()
+        if num is None:
+            self.retrain_folder = os.path.join(self.root, self.root_name+"_0000")
+            num = 0
+        else:
+            self.retrain_folder = os.path.join(self.root, self.root_name + "_" +
+                                               self.retrain_format.format(num+1))
+            num += 1
+
+        os.makedirs(self.retrain_folder)
+
+        self.path_config[self.root_name][str(num)] = {}
+        self.path_config[self.root_name][str(num)]["main"] = self.retrain_folder
+        self.retrain_num = num
+        return self.retrain_folder
+
+
+    def batch_check(self, retrain_folder=None):
+        if retrain_folder is None:
+            num = self.get_current_retrain_number()
+            if num is None:
+                raise SystemError("No retrain folder is created.")
+            self.retrain_folder = os.path.join(self.root, self.root_name + "_" +
+                                               self.retrain_format.format(num))
+            self.retrain_num = num
+        else:
+            self.retrain_folder = retrain_folder
+            self.retrain_num = int(retrain_folder[-2:])
+
+        batch_list = os.listdir(self.retrain_folder)
+
+        if not batch_list:
+            self.data_folder = os.path.join(self.retrain_folder, "00")
+            num = 0
+        else:
+            batch_list = list(map(int, batch_list))
+            num = max(batch_list) + 1
+            self.data_folder = os.path.join(self.retrain_folder, "{0:02d}".format(num))
+
+        os.makedirs(self.data_folder)
+
+        self.path_config[self.root_name][str(self.retrain_num)][str(num)] = {}
+        self.path_config[self.root_name][str(self.retrain_num)][str(num)]["main"] = self.data_folder
+        self.batch_num = num
+
+        return self.data_folder
+
+##############################################################################################################
+
+    def specify_path(self, retrain_num, batch_num, batch_flag=None):
+        self.retrain_num = retrain_num
+        self.batch_num = batch_num
+        self.retrain_folder = os.path.join(self.root, self.root_name + "_" +
+                                           self.retrain_format.format(retrain_num))
+        self.data_folder = os.path.join(self.retrain_folder, "{0:02d}".format(batch_num))
+        self.get_folder_path(batch_flag)
+        return self.data_folder
+
+##############################################################################################################
+    def get_folder_path(self, batch_flag=None):
+        # As self.data_folder exists
+        self.main_path = {}
+        out_path = self.path_config[self.root_name][str(self.retrain_num)][str(self.batch_num)]
+        for i in range(len(self.structure_list)-1):
+            self.main_path[i] = {}
+            self.main_path[i]["main"] = os.path.join(self.data_folder, self.structure_list[i])
+            out_path[str(i)] = {}
+            out_path[str(i)]["main"] = self.main_path[i]["main"]
+
+        self.main_path[99] = {}
+        self.main_path[99]["main"] = os.path.join(self.data_folder, "99_LOG/")
+        out_path[str(99)] = {}
+        out_path[str(99)]["main"] = self.main_path[99]["main"]
+
+        if batch_flag is None:
+            for i in [3,4,5,8]:
+                for idx, sub_path in enumerate(self.sub_path):
+                    self.main_path[i][sub_path] = os.path.join(self.main_path[i]["main"], sub_path)
+                    out_path[str(i)][str(idx)] = self.main_path[i][sub_path]
+
+            for idx, dir_ in enumerate(self.select_model_dir):
+                self.main_path[7][dir_] = os.path.join(self.main_path[7]["main"], dir_)
+                out_path[str(7)][str(idx)] = self.main_path[7][dir_]
+
+        for name in self.model_pred_name:
+            self.main_path[6][name] = {}
+            self.main_path[6][name]["main"] = os.path.join(self.main_path[6]["main"], name)
+            out_path[str(6)][name] = {}
+            out_path[str(6)][name]["main"] = self.main_path[6][name]["main"]
+            if batch_flag is None:
+                for idx, model_step in enumerate(self.model_steps):
+                    self.main_path[6][name][model_step] = os.path.join(self.main_path[6][name]["main"], model_step)
+                    out_path[str(6)][name][str(idx)] = self.main_path[6][name][model_step]
+        return None
+
+    def get_path_config(self):
+        return self.path_config
+
+    def save_path_config(self, path):
+        in_path = os.path.join(path, "path_config.json")
+        with open(in_path , 'w') as fp:
+            json.dump(self.path_config, fp, indent=4, sort_keys=True)
+        return None
+
+    def init_folders(self, batch_flag=None):
+        paths = [self.main_path[i]["main"] for i in range(9)]
+        paths.append(self.main_path[99]["main"])
+
+        if batch_flag is None:
+            for sub_path in self.sub_path:
+                tmp_path = [self.main_path[i][sub_path] for i in [3, 4, 5, 8]]
+                paths.extend(tmp_path)
+
+            tmp_path = [self.main_path[7][dir_] for dir_ in self.select_model_dir]
+            paths.extend(tmp_path)
+
+            for name in self.model_pred_name:
+                for model_step in self.model_steps:
+                    paths.append(self.main_path[6][name][model_step])
+        else:
+            for name in self.model_pred_name:
+                paths.append(self.main_path[6][name]["main"])
+
+        for path in paths:
+            if not os.path.exists(path):
+                os.makedirs(path)
+        return None
+
+
+    def get_file_path(self, merge_flag=None):
+        if merge_flag is None:
+            path_0 = self.sub_path[0]
+            model_path_1 = self.model_steps[0]
+            model_path_2 = self.model_steps[1]
+            select_path = self.select_model_dir[0]
+        else:
+            path_0 = self.sub_path[2]
+            model_path_1 = self.model_steps[3]
+            model_path_2 = self.model_steps[4]
+            select_path = self.select_model_dir[1]
+
+        # General
+        # 00_config
+        self.config_path = os.path.join(self.main_path[0]["main"], self.config_default_name)
+        # 01_OriginalData
+        self.raw_path = os.path.join(self.main_path[1]["main"], self.raw_data_default_name)
+        # 99_LOG
+        self.sys_log_path = os.path.join(self.main_path[99]["main"], self.sys_log_default_name)
+
+        # Output of each folder
+        # 02_DataReview/
+#        self.missing_path = os.path.join(self.main_path[2]["main"], "missing_rate_list.csv")
+#        self.outspec_path = os.path.join(self.main_path[2]["main"], "outspec_table.csv")
+#        self.summary_path = os.path.join(self.main_path[2]["main"], "summary_table.csv")
+
+        # 03_PreprocessedData/
+        # Model_building
+        self.data_train_path = os.path.join(self.main_path[3][path_0], 'Data_Train.csv')
+        self.data_test_path  = os.path.join(self.main_path[3][path_0], 'Data_Test.csv')
+        self.x_train_path  = os.path.join(self.main_path[3][path_0], 'x_Train.csv')
+        self.y_train_path   = os.path.join(self.main_path[3][path_0], 'y_Train.csv')
+        self.Cat_config_path = os.path.join(self.main_path[3][path_0], 'Cat_Config.json')
+        self.DataImpute_config_path = os.path.join(self.main_path[3][path_0], 'DataImpute_Config.json')
+        self.DataTrans_config_path = os.path.join(self.main_path[3][path_0], 'DataTrans_Config.json')
+        self.DelMissingCol_config_path = os.path.join(self.main_path[3][path_0], 'DelMissingCol_Config.json')
+        self.DelNonNumCol_config_path = os.path.join(self.main_path[3][path_0], 'DelNonNumCol_Config.json')
+
+        # 04_XDI/
+        # Model_building
+        self.XDI_PCA_path            = os.path.join(self.main_path[4][path_0], "XDI_PCA.pkl")
+        self.XDI_DataTrans_path = os.path.join(self.main_path[4][path_0], "XDI_DataTrans.pkl")
+        self.XDI_PreWork_DataTrans_path = os.path.join(self.main_path[4][path_0], "XDI_PreWork_DataTrans.pkl")
+
+        # 05_YDI/
+        # Model_building
+        # self.YDI_threshold_table_path   = os.path.join(self.main_path[5][self.sub_path_model], "YDI_threshold_table.csv")
+        # self.YDI_Clustering_path        = os.path.join(self.main_path[5][self.sub_path_model], "YDI_Clustering.pkl")
+        self.YDI_Group = os.path.join(self.main_path[5][path_0], "YDI_Group/")
+        self.YDI_threshold_table_path = os.path.join(self.main_path[5][path_0], "YDI_threshold_table.csv")
+        self.YDI_PreWork_DataTrans = os.path.join(self.main_path[5][path_0], "YDI_PreWork_DataTrans.pkl")
+
+        # 06_Model
+        for name in self.model_pred_name:
+            if name == "XGB":
+                self.xgb_tuning = os.path.join(self.main_path[6][name][model_path_1], "Parameter_aftertuning.csv")
+                self.xgb_model = os.path.join(self.main_path[6][name][model_path_2], "XGB.model")
+                self.xgb_parameter_path = os.path.join(self.main_path[6][name][model_path_1], "xgb_parameter.json")
+
+            elif name == "PLS":
+                self.pls_train_usp = os.path.join(self.main_path[6][name][model_path_2], "Train.usp")
+
+        # 07_SelectModel/
+        self.y_pred_merge_train = os.path.join(self.main_path[7][select_path], "y_pred_merge_train.csv")
+        self.y_pred_merge_test = os.path.join(self.main_path[7][select_path], "y_pred_merge_test.csv")
+
+        # 08_CI/
+        # Model_building
+        self.MXCI_x_train_path = os.path.join(self.main_path[8][path_0], "MXCI_x_train.pkl")
+        self.CI_config_path = os.path.join(self.main_path[8][path_0], "CI_config.json")
+
+        return None
+
+    def get_batch_file_path(self, batch_flag=None, merge_flag=None):
+        # model_path = self.model_steps[2] / self.model_steps[5]
+        # sub_path = self.sub_path[1] / self.sub_path[3]
+        if merge_flag is None:
+            sub_path = self.sub_path[1]
+            model_path = self.model_steps[2]
+        else:
+            sub_path = self.sub_path[3]
+            model_path = self.model_steps[5]
+        # batch data will be saved in different places
+        self.save_path = {}
+        self.save_path[6] = {}
+        if batch_flag is None:
+            for i in [3,4,5,8]:
+                self.save_path[i] = self.main_path[i][sub_path]
+            self.save_path[7] = self.main_path[7]["main"]
+            for name in self.model_pred_name:
+                self.save_path[6][name] = self.main_path[6][name][model_path]
+        else:
+            for i in [3,4,5,7,8]:
+                self.save_path[i] = self.main_path[i]["main"]
+            for name in self.model_pred_name:
+                self.save_path[6][name] = self.main_path[6][name]["main"]
+
+        # 99_LOG
+        self.sys_log_path = os.path.join(self.main_path[99]["main"], self.sys_log_default_name)
+
+        # 03_PreprocessedData/
+        self.y_test_path  = os.path.join(self.save_path[3], 'y_Test.csv')
+        self.x_test_path  = os.path.join(self.save_path[3], 'x_Test.csv')
+
+        # 04_XDI/
+        # self.XDI_offline_pic_path    = os.path.join(self.save_path[4], "XDI.png")
+        # self.XDI_offline_path        = os.path.join(self.save_path[4], "XDI_offline.csv")
+        self.XDI_offline_path = os.path.join(self.retrain_folder, "00", self.structure_list[4], self.sub_path[3],
+                                             "XDI_offline.csv")
+
+        # 05_YDI/
+        # self.YDI_offline_path = os.path.join(self.save_path[5], "YDI_offline.csv")
+        # self.YDI_offline_pic_path       = os.path.join(self.save_path[5], "YDI.png")
+
+
+        # 06_Model
+
+        # for name in self.model_pred_name:
+        #     if name == "XGB":
+        #         self.xgb_predict_feature_score = os.path.join(self.save_path[6][name], "FeatureScore.csv")
+        #         self.xgb_predict_importance_10 = os.path.join(self.save_path[6][name], "Importance10.jpg")
+        #         self.xgb_predict_importance_30 = os.path.join(self.save_path[6][name], "Importance30.jpg")
+        #         self.xgb_predict_test = os.path.join(self.save_path[6][name], "testPredResult.csv")
+        #         self.xgb_predict_train = os.path.join(self.save_path[6][name], "trainPredResult.csv")
+        #
+        #     elif name == "PLS":
+        #         self.pls_predict_test = os.path.join(self.save_path[6][name], "testPredResult.csv")
+        #         self.pls_predict_train = os.path.join(self.save_path[6][name], "trainPredResult.csv")
+        #         self.pls_train_xlsx = os.path.join(self.save_path[6][name], "Train.xlsx")
+        #         # self.pls_train_usp = os.path.join(self.save_path[6][name], "Train.usp")
+        #         self.pls_test_xlsx = os.path.join(self.save_path[6][name], "Test.xlsx")
+        #         self.pls_pred_test = os.path.join(self.save_path[6][name], "PredTest.xlsx")
+
+        # 07_SelectModel/
+        if batch_flag is not None:
+            self.y_pred_merge_train = os.path.join(self.save_path[7], "y_pred_merge_train.csv")
+            self.y_pred_merge_test = os.path.join(self.save_path[7], "y_pred_merge_test.csv")
+            self.y_pred_merge_train_special = os.path.join(self.retrain_folder, "00", self.structure_list[7],
+                                                           self.select_model_dir[1], "y_pred_merge_train.csv")
+
+        # 08_CI/
+        # self.MXCI_fig_path = os.path.join(self.save_path[8], "MXCI_offline.png")
+        # self.MYCI_fig_path = os.path.join(self.save_path[8], "MYCI_offline.png")
+        # self.light_fig_path = os.path.join(self.save_path[8], "MXCI_MYCI_light_offline.png")
+        # self.MXCI_MYCI_offline_path = os.path.join(self.main_path[8][sub_path], "MXCI_MYCI_offline.csv")
+        self.MXCI_MYCI_offline_path = os.path.join(self.retrain_folder, "00", self.structure_list[8], self.sub_path[3],
+                                                   "MXCI_MYCI_offline.csv")
+        return None
+
+##############################################################################################################
+    def training_ext_check(self):
+        self.file_exist_check(self.root, self.training_data, True)
+        self.file_exist_check(self.root, self.config_file, True)
+        self.file_extension_check(self.root, ".csv", self.training_data, True)
+        self.file_extension_check(self.root, ".json", self.config_file, True)
+        return None
+
+    def batch_ext_check(self, batch_data_list):
+        left_list = []
+        for batch in batch_data_list:
+            idx1 = self.file_exist_check(self.root, batch, False)
+            idx2 = self.file_extension_check(self.root, ".csv", batch, False)
+            if idx1 and idx2:
+                left_list.append(batch)
+        return left_list
+
+    def split_path(self, path):
+        dirname, basename = os.path.split(path)
+        base, ext = os.path.splitext(basename)
+        return dirname, base, ext
+
+    def rename_path(self, source_path):
+        dirname, base, ext = self.split_path(source_path)
+        new_path = os.path.join(dirname, base + "_copy" + ext)
+        os.rename(source_path, new_path)
+        return new_path
+
+
+    def file_extension_check(self, error_folder, ext, file, raise_flag):
+        extention = os.path.splitext(file)[-1].lower()
+        if extention != ext:
+            error_path = os.path.join(error_folder, "error.log")
+            with open(error_path, 'a') as file:
+                file.write(os.path.basename(file) + " should be "+ ext +" file\n")
+                print(os.path.basename(file) + " should be "+ ext +" file")
+            if raise_flag:
+                raise FileNotFoundError
+            return False
+        return True
+
+    def file_exist_check(self, error_folder, file, raise_flag):
+        if not os.path.exists(file):
+            error_path = os.path.join(error_folder, "error.log")
+            with open(error_path, 'a') as f:
+                f.write("Error while loading file: "+ file +"\n")
+                print("Error while loading file: "+ file)
+                if raise_flag:
+                    raise FileNotFoundError
+            return False
+        return True
+
+
+##############################################################################################################
+    def get_train_file(self):
+        raw_path = os.path.join(self.main_path[1]["main"], self.raw_data_default_name)
+        config_path = os.path.join(self.main_path[0]["main"], self.config_default_name)
+        try:
+            # os.rename(self.raw_name, raw_path)
+            # os.rename(self.config_name, config_path)
+            copyfile(self.training_data, raw_path)
+            copyfile(self.config_file, config_path)
+        except Exception as e:
+            error_path = os.path.join(self.data_folder, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Fail to rename file:\n")
+                file.write(str(e)+"\n")
+                file.write(traceback.format_exc())            
+            raise
+        return None
+
+    def get_batch_file(self, batch, batch_num):
+        sys_path = os.path.join(self.root, "System.log")
+        self.check_previous_file()
+        try:
+            with open(sys_path, 'a') as file:
+                self.batch_name = "batch_data_"+"{0:02d}".format(batch_num)+".csv"
+                self.old_path = self.raw_path
+                self.raw_path = os.path.join(self.main_path[1]["main"], self.batch_name)
+                # self.batch_path = os.path.join(self.root, self.batch_name)
+                copyfile(batch, self.raw_path)
+                file.write("Batch comparison :" + os.path.basename(batch)+" , "+"batch_data_"+
+                           "{0:02d}".format(batch_num) + ".csv\n")
+        except:
+            error_path = os.path.join(self.root, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Fail to copy the batch:" + batch + "\n")
+            raise FileNotFoundError
+
+        return None
+
+
+    def check_previous_file(self):
+        if not hasattr(self, "raw_path"):
+            self.raw_path = os.path.join(self.retrain_folder, "00", self.structure_list[1],
+                                         self.raw_data_default_name)
+        else:
+            print("raw_path")
+        if not hasattr(self, "config_path"):
+            self.config_path = os.path.join(self.retrain_folder, "00", self.structure_list[0],
+                                            self.config_default_name)
+        else:
+            print("config_path")
+
+        if not hasattr(self, "x_train_path"):
+            self.x_train_path = os.path.join(self.retrain_folder, "00", self.structure_list[3],
+                                             self.sub_path[2], "x_Train.csv")
+        else:
+            print("x_train_path")
+
+        if not hasattr(self, "y_train_path"):
+            self.y_train_path = os.path.join(self.retrain_folder, "00", self.structure_list[3],
+                                             self.sub_path[2], "y_Train.csv")
+        else:
+            print("y_train_path")
+
+        if not hasattr(self, "DataImpute_config_path"):
+            self.DataImpute_config_path = os.path.join(self.retrain_folder, "00", self.structure_list[3],
+                                                       self.sub_path[2], "DataImpute_Config.json")
+        else:
+            print("DataImpute_config_path")
+
+        if not hasattr(self, "DataTrans_config_path"):
+            self.DataTrans_config_path = os.path.join(self.retrain_folder, "00", self.structure_list[3],
+                                                      self.sub_path[2], "DataTrans_Config.json")
+        else:
+            print("DataTrans_config_path")
+
+        if not hasattr(self, "DelMissingCol_config_path"):
+            self.DelMissingCol_config_path = os.path.join(self.retrain_folder, "00", self.structure_list[3],
+                                                          self.sub_path[2], "DelMissingCol_Config.json")
+        else:
+            print("DelMissingCol_config_path")
+
+        if not hasattr(self, "DelNonNumCol_config_path"):
+            self.DelNonNumCol_config_path = os.path.join(self.retrain_folder, "00", self.structure_list[3],
+                                                         self.sub_path[2], "DelNonNumCol_Config.json")
+        else:
+            print("DelNonNumCol_config_path")
+
+        if not hasattr(self, "Cat_config_path"):
+            self.Cat_config_path = os.path.join(self.retrain_folder, "00", self.structure_list[3],
+                                                self.sub_path[2], "Cat_Config.json")
+        else:
+            print("Cat_config_path")
+
+        if not hasattr(self, "XDI_PCA_path"):
+            self.XDI_PCA_path = os.path.join(self.retrain_folder, "00", self.structure_list[4],
+                                             self.sub_path[2], "XDI_PCA.pkl")
+        else:
+            print("XDI_PCA_path")
+
+        if not hasattr(self, "XDI_DataTrans_path"):
+            self.XDI_DataTrans_path = os.path.join(self.retrain_folder, "00", self.structure_list[4],
+                                                   self.sub_path[2], "XDI_DataTrans.pkl")
+        else:
+            print("XDI_DataTrans_path")
+
+        if not hasattr(self, "XDI_PreWork_DataTrans_path"):
+            self.XDI_PreWork_DataTrans_path = os.path.join(self.retrain_folder, "00", self.structure_list[4],
+                                                           self.sub_path[2], "XDI_PreWork_DataTrans.pkl")
+        else:
+            print("XDI_PreWork_DataTrans_path")
+
+        if not hasattr(self, "YDI_Group"):
+            self.YDI_Group = os.path.join(self.retrain_folder, "00", self.structure_list[5],
+                                          self.sub_path[2], "YDI_Group/")
+        else:
+            print("YDI_Group")
+
+        if not hasattr(self, "YDI_threshold_table_path"):
+            self.YDI_threshold_table_path = os.path.join(self.retrain_folder, "00", self.structure_list[5],
+                                                         self.sub_path[2], "YDI_threshold_table.csv")
+        else:
+            print("YDI_threshold_table_path")
+
+        if not hasattr(self, "YDI_PreWork_DataTrans"):
+            self.YDI_PreWork_DataTrans = os.path.join(self.retrain_folder, "00", self.structure_list[5],
+                                                      self.sub_path[2], "YDI_PreWork_DataTrans.pkl")
+        else:
+            print("YDI_PreWork_DataTrans")
+
+        if not hasattr(self, "xgb_tuning"):
+            self.xgb_tuning = os.path.join(self.retrain_folder, "00", self.structure_list[6], "XGB",
+                                           self.model_steps[0], "Parameter_aftertuning.csv")
+        else:
+            print("xgb_tuning")
+
+        if not hasattr(self, "xgb_model"):
+            self.xgb_model = os.path.join(self.retrain_folder, "00", self.structure_list[6], "XGB",
+                                          self.model_steps[1], "XGB.model")
+        else:
+            print("xgb_model")
+
+        if not hasattr(self, "pls_train_usp"):
+            self.pls_train_usp = os.path.join(self.retrain_folder, "00", self.structure_list[6], "PLS",
+                                              self.model_steps[1], "Train.usp")
+        else:
+            print("pls_train_usp")
+
+        if not hasattr(self, "Previous_Model_Folder"):
+            self.Previous_Model_Folder = os.path.join(self.retrain_folder, "00", self.structure_list[6])
+        else:
+            print("Previous_Model_Folder")
+
+        if not hasattr(self, "CI_config_path"):
+            self.CI_config_path = os.path.join(self.retrain_folder, "00", self.structure_list[8],
+                                               self.sub_path[2], "CI_config.json")
+        else:
+            print("CI_config_path")
+
+        if not hasattr(self, "MXCI_x_train_path"):
+            self.MXCI_x_train_path = os.path.join(self.retrain_folder, "00", self.structure_list[8],
+                                                  self.sub_path[2], "MXCI_x_train.pkl")
+        else:
+            print("MXCI_x_train_path")
+        return None
+##############################################################################################################
+    def create_path_files_init(self):
+        self.file_path = {}
+        self.file_path["config_path"] = os.path.abspath(self.config_path)
+        self.file_path["log_path"] = os.path.abspath(self.sys_log_path)
+        return None
+         
+    def create_path_files_save(self, path):
+        self.file_path["error_path"] = os.path.abspath(os.path.join(path, "error.log"))
+        in_path = os.path.join(path, "file_path.json")
+        with open(in_path, 'w') as fp:
+            json.dump(self.file_path, fp, indent=4, sort_keys=True)
+        return None
+
+
+    def create_path_files(self, merge_flag=None):
+        if merge_flag is None:
+            path_0 = self.sub_path[0]
+            model_path_1 = self.model_steps[0]
+            model_path_2 = self.model_steps[1]
+            dir_ = self.select_model_dir[0]
+        else:
+            path_0 = self.sub_path[2]
+            model_path_1 = self.model_steps[3]
+            model_path_2 = self.model_steps[4]
+            dir_ = self.select_model_dir[1]
+
+        # 02_DataReview/
+        self.create_path_files_init()
+        self.file_path["raw_path"] = os.path.abspath(self.raw_path)
+        self.create_path_files_save(self.main_path[2]["main"])
+
+        # 03_PreprocessedData/
+        # Model_building
+        self.create_path_files_init()
+        self.file_path["raw_path"] = os.path.abspath(self.raw_path)
+        self.create_path_files_save(self.main_path[3][path_0])
+
+        # 04_XDI/
+        # Model_building
+        self.create_path_files_init() 
+        self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+        self.create_path_files_save(self.main_path[4][path_0])
+
+        # 05_YDI/
+        # Model_building
+        self.create_path_files_init()
+        self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+        self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+        self.create_path_files_save(self.main_path[5][path_0])
+
+        # 06_Model/
+        for name in self.model_pred_name:
+            if name == "XGB":
+                # 00_Parameter_tuning
+                self.create_path_files_init()
+                self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+                self.file_path["x_test_path"] = os.path.abspath(self.x_test_path)
+                self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+                self.create_path_files_save(self.main_path[6][name][model_path_1])
+                # 01_Model_building
+                self.create_path_files_init()
+                self.file_path["xgb_tuning"] = os.path.abspath(self.xgb_tuning)
+                self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+                self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+                self.file_path["xgb_parameter_path"] = os.path.abspath(self.xgb_parameter_path)
+                self.create_path_files_save(self.main_path[6][name][model_path_2])
+
+            elif name == "PLS":
+                # 01_Model_building
+                empty_x_test = os.path.join(self.main_path[6][name][model_path_2], "x_Test_empty.csv")
+                empty_y_test = os.path.join(self.main_path[6][name][model_path_2], "y_Test_empty.csv")
+                self.create_path_files_init()
+                self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+                self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+                self.file_path["x_test_path"] = os.path.abspath(empty_x_test)
+                self.file_path["y_test_path"] = os.path.abspath(empty_y_test)
+                # self.file_path["x_test_path"] = os.path.abspath(self.x_test_path)
+                # self.file_path["y_test_path"] = os.path.abspath(self.y_test_path)
+                self.create_path_files_save(self.main_path[6][name][model_path_2])
+
+
+        # 07_SelectModel/
+        self.create_path_files_init()
+        self.file_path["Model_Folder"] = os.path.abspath(self.main_path[6]["main"])
+        self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+        if merge_flag is None:
+            # print(self.main_path[7][self.select_model_dir[0]])
+            self.file_path["y_test_path"] = os.path.abspath(self.y_test_path)
+            # print(self.file_path)
+        self.create_path_files_save(self.main_path[7][dir_])
+        
+        # 08_CI/
+        # Model_building
+        self.create_path_files_init()
+        self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+        self.file_path["y_pred_merge_train"] = os.path.abspath(self.y_pred_merge_train)
+        self.create_path_files_save(self.main_path[8][path_0])
+        return None
+
+    def data_preprocess_test_path(self, batch_flag=None):
+        if batch_flag is None:
+            self.data_test = os.path.join(self.main_path[3][self.sub_path[0]], "Data_test.csv")
+        else:
+            self.data_test = self.raw_path
+        return None
+
+    def create_batch_path_files(self, batch_flag=None):
+        # 02_DataReview/
+        self.create_path_files_init()
+        self.file_path["raw_path"] = os.path.abspath(self.raw_path)
+        if hasattr(self, "old_path"):
+            self.file_path["old_path"] = os.path.abspath(self.old_path)
+        self.create_path_files_save(self.main_path[2]["main"])
+        # 03_PreprocessedData/
+        self.create_path_files_init()
+        self.file_path["data_test"] = os.path.abspath(self.data_test)
+        self.file_path['Cat_config_path'] = os.path.abspath(self.Cat_config_path)
+        self.file_path["DataImpute_config_path"] = os.path.abspath(self.DataImpute_config_path)
+        self.file_path["DataTrans_config_path"] = os.path.abspath(self.DataTrans_config_path)
+        self.file_path["DelMissingCol_config_path"] = os.path.abspath(self.DelMissingCol_config_path)
+        self.file_path["DelNonNumCol_config_path"] = os.path.abspath(self.DelNonNumCol_config_path)
+        self.create_path_files_save(self.save_path[3])
+        # 04_XDI/
+        self.create_path_files_init()
+        self.file_path["raw_path"] = os.path.abspath(self.raw_path)
+        self.file_path["x_test_path"] = os.path.abspath(self.x_test_path)
+        self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+        self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+        self.file_path["y_test_path"] = os.path.abspath(self.y_test_path)
+        self.file_path["XDI_PCA_path"] = os.path.abspath(self.XDI_PCA_path)
+        self.file_path["XDI_DataTrans_path"] = os.path.abspath(self.XDI_DataTrans_path)
+        self.file_path["XDI_PreWork_DataTrans_path"] = os.path.abspath(self.XDI_PreWork_DataTrans_path)
+        self.file_path["XDI_data_remove_path"] = os.path.abspath(os.path.join(self.up_root, "XDI_data_remove.csv"))
+        self.file_path["XDI_offline_path"] = os.path.abspath(self.XDI_offline_path)
+        self.create_path_files_save(self.save_path[4])
+        # 05_YDI/
+        self.create_path_files_init()
+        self.file_path["YDI_Group_path"] = os.path.abspath(self.YDI_Group)
+        self.file_path["raw_path"] = os.path.abspath(self.raw_path)
+        self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+        self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+        self.file_path["y_test_path"] = os.path.abspath(self.y_test_path)
+        self.file_path["x_test_path"] = os.path.abspath(self.x_test_path)
+        self.file_path["YDI_threshold_table_path"] = os.path.abspath(self.YDI_threshold_table_path)
+        self.file_path["YDI_PreWork_DataTrans"] = os.path.abspath(self.YDI_PreWork_DataTrans)
+        self.file_path["YDI_data_remove_path"] = os.path.abspath(os.path.join(self.up_root, "YDI_data_remove.csv"))
+        self.create_path_files_save(self.save_path[5])
+        # 06_Model/
+        for name in self.model_pred_name:
+            if name == "XGB":
+                self.create_path_files_init()
+                self.file_path["xgb_model"] = os.path.abspath(self.xgb_model)
+                self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+                self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+                self.file_path["x_test_path"] = os.path.abspath(self.x_test_path)
+                self.file_path["y_test_path"] = os.path.abspath(self.y_test_path)
+                self.create_path_files_save(self.save_path[6][name])
+
+            elif name == "PLS":
+                # Prediction
+                self.create_path_files_init()
+                basename = os.path.basename(os.path.abspath(self.save_path[6][name]))
+                self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+                self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+                self.file_path["x_test_path"] = os.path.abspath(self.x_test_path)
+                self.file_path["y_test_path"] = os.path.abspath(self.y_test_path)
+                if basename == name:
+                    empty_x_train = os.path.join(self.save_path[6][name], "x_Train_empty.csv")
+                    empty_y_train = os.path.join(self.save_path[6][name], "y_Train_empty.csv")
+                    self.file_path["x_train_path"] = os.path.abspath(empty_x_train)
+                    self.file_path["y_train_path"] = os.path.abspath(empty_y_train)
+
+                self.file_path["pls_train_usp"] = os.path.abspath(self.pls_train_usp)
+                self.create_path_files_save(self.save_path[6][name])
+
+        # # 07_SelectModel/
+        if batch_flag is not None:
+            self.create_path_files_init()
+            self.file_path["Previous_Model_Folder"] = os.path.abspath(self.Previous_Model_Folder)
+            self.file_path["Model_Folder"] = os.path.abspath(self.main_path[6]["main"])
+            self.file_path["y_train_path"] = os.path.abspath(self.y_train_path)
+            self.file_path["y_test_path"] = os.path.abspath(self.y_test_path)
+            self.file_path["y_pred_merge_train"] = os.path.abspath(self.y_pred_merge_train_special)
+            self.create_path_files_save(self.save_path[7])
+
+        # 08_CI/
+        self.create_path_files_init()
+        self.file_path["MXCI_x_train_path"] = os.path.abspath(self.MXCI_x_train_path)
+        self.file_path["x_train_path"] = os.path.abspath(self.x_train_path)
+        self.file_path["x_test_path"] = os.path.abspath(self.x_test_path)
+        self.file_path["y_pred_merge_train"] = os.path.abspath(self.y_pred_merge_train)
+        self.file_path["y_pred_merge_test"] = os.path.abspath(self.y_pred_merge_test)
+        self.file_path["CI_config_path"] = os.path.abspath(self.CI_config_path)
+        self.file_path["MXCI_MYCI_offline_path"] = os.path.abspath(self.MXCI_MYCI_offline_path)
+        self.create_path_files_save(self.save_path[8])
+
+##############################################################################################################
+
+    def batch_process(self, batch_list, retrain_folder_path):
+        # check the batch quality
+        leftlist = self.batch_ext_check(batch_list)
+
+        num = self.get_current_batch_number(retrain_folder_path)
+        if num != None:
+            batch_num = num + 1
+        else:
+            batch_num = 0
+            print("WARNING: NO MODEL DETECTED. PLEASE CREATE 00 FILE FIRST.")
+
+        for batch in leftlist:
+            self.batch_check(retrain_folder_path)
+            self.get_folder_path(batch_flag=True)
+            self.get_batch_file_path(batch_flag=True)
+            self.init_folders(batch_flag=True)
+            self.get_batch_file(batch, batch_num)
+            self.data_preprocess_test_path(batch_flag=True)
+            self.create_batch_path_files(batch_flag=True)
+            batch_num += 1
+        return None
+
+
+    def init_train(self, training_data, batch_list=[]):
+        self.training_data = training_data
+
+        # create retrain_folder
+        retrain_folder_path = self.retrain_check()
+        # create data_folder
+        self.batch_check(retrain_folder_path)
+        # get path under data_folder
+        self.get_folder_path()
+        self.get_file_path()
+        self.get_batch_file_path()
+        # check data
+        self.training_ext_check()
+        # create folders under data_folder
+        self.init_folders()
+        # copy raw and config file
+        self.get_train_file()
+        # create file_path.json
+        self.create_path_files()
+        self.data_preprocess_test_path()
+        self.create_batch_path_files()
+        if batch_list:
+            self.batch_process(batch_list, retrain_folder_path)
+        return None
+
+
+    def init_merge(self):
+        self.get_file_path(merge_flag=True)
+        self.get_batch_file_path(merge_flag=True)
+        self.create_path_files(merge_flag=True) # create file_path.json
+        self.data_preprocess_test_path()
+        self.create_batch_path_files()
+        return
+
+    def init_batch(self, batch_list, retrain_folder_path=None):
+        if retrain_folder_path is None:
+            retrain_num = self.get_current_retrain_number()
+            if retrain_num is None:
+                print("WARNING: NO MODEL DETECTED.")
+                raise SystemError
+            else:
+                retrain_folder_path = os.path.join(self.root,
+                                                   os.path.basename(self.root)+"_"+
+                                                   self.retrain_format.format(retrain_num))
+        else:
+            if not os.path.isdir(retrain_folder_path):
+                print("No dir is found in " + retrain_folder_path)
+                raise FileNotFoundError
+
+        self.batch_process(batch_list, retrain_folder_path)
+        return None
+
+if __name__ == "__main__":
+    sorce_dir = "New_path_test"
+    base_path = os.path.join("../Cases/", sorce_dir)  # base_path = ../Cases/CVD2E_Split1_Test
+    train_data = os.path.join(base_path, "T75R4_combine_PM1_first10sheet.csv")
+    config_file = os.path.join(base_path, "config-1.json")
+    batch_data = [os.path.join(base_path, "T75R4_combine_PM1.csv")]
+
+    path = All_path(base_path, config_file)
+    path.retrain_check()
+    # print(path.path_config["New_path_test"]["main"])
+    # print(path.path_config["New_path_test"][1]["main"])
+    path.batch_check()
+    # print(path.path_config["New_path_test"][1][0]["main"])
+    path.get_folder_path()
+
+    path_config = path.get_path_config()
+    # print()
+    # print(path_config["New_path_test"][1][0][6]["XGB"]["02_Prediction"])
+
+    path2 = All_path(base_path, config_file, path_config)
+    path2.retrain_check()
+    path2.batch_check()
+    path2.get_folder_path()
+    path_config2 = path2.get_path_config()
+
+    path2.save_path_config(path_config2["New_path_test"]["main"])
+
+#----------------------------------------------------------------------------------
+#PLS.model.py
+# -*- coding: utf-8 -*-
+import subprocess
+from Read_path import read_path
+from config import read_config, save_config
+from CreateLog import WriteLog
+import time
+import os
+import pandas as pd
+
+def pls_build(data_folder):   
+    data_folder = os.path.abspath(data_folder)  #20190613 relative path -> Absolute path
+    #infile=open(r"D:/AVM/Modules/AVM_PLS_Build_Test.bat", "w")#Opens the file
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Build_Test.bat", "w")#Opens the file
+    #batcode = r"start " + r"D:/AVM/Modules/AVM_PLS_Build/AVM_PLS_Build.exe " + data_folder + r"/file_path.json"
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Build/AVM_PLS_Build.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    #subprocess.call("AVM_PLS_Build_Test.bat", cwd=r"D:/AVM/Modules")
+    
+    input_path = read_path(data_folder)
+    input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log       
+    config = read_config(input_path["config_path"], mylog)
+    
+    x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+    #x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+    y_Trainpath=input_path["y_train_path"] #訓練資料集路徑
+    #y_Testpath=input_path["y_test_path"]
+    delcol = config["IDX"] 
+    
+    #20190611 avoid Unnamed column
+    x_train=pd.read_csv(x_Trainpath)
+    if x_train.shape[0] == 0:
+        x_train_del=pd.read_csv(x_Trainpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        x_train_del=x_train.drop(delcol, axis=1)
+    
+    y_train=pd.read_csv(y_Trainpath)
+    if y_train.shape[0] == 0:
+        y_train_del=pd.read_csv(y_Trainpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        y_train_del=y_train.drop(delcol, axis=1)
+
+    input_path["x_train_path_del"] = os.path.join(data_folder, "x_Train_del.csv")
+    input_path["y_train_path_del"] = os.path.join(data_folder, "y_Train_del.csv")
+    input_path["x_test_path_del"] = os.path.join(data_folder, "x_test_del.csv")
+    input_path["y_test_path_del"] = os.path.join(data_folder, "y_test_del.csv")
+    save_config(input_file_path, input_path, mylog)
+    
+    x_train_del.to_csv(input_path["x_train_path_del"], index=False)
+    y_train_del.to_csv(input_path["y_train_path_del"], index=False)
+    #x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    #y_test_del.to_csv(input_path["y_test_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Build_Test.bat", cwd=r"D:/SVM/Modules")
+
+    model_pls_build_path = os.path.join(data_folder, "Train.usp")
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_build_path):
+                break
+            else:
+                time.sleep(n)
+    timer(10)
+
+def pls_predict(data_folder):   
+    data_folder = os.path.abspath(data_folder)
+    #infile=open(r"D:/AVM/Modules/AVM_PLS_Predict_Test.bat", "w")#Opens the file
+    #batcode = r"start " + r"D:/AVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Predict_Test.bat", "w")#Opens the file
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    #subprocess.call("AVM_PLS_Predict_Test.bat", cwd=r"D:/AVM/Modules")
+    
+    input_path = read_path(data_folder)
+    input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log       
+    config = read_config(input_path["config_path"], mylog)
+    
+    x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+    x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+    y_Trainpath=input_path["y_train_path"] #訓練資料集路徑
+    y_Testpath=input_path["y_test_path"]
+    delcol = config["IDX"] 
+    
+    #20190611 avoid Unnamed column
+    x_train=pd.read_csv(x_Trainpath)
+    if x_train.shape[0] == 0:
+        x_train_del=pd.read_csv(x_Trainpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        x_train_del=x_train.drop(delcol, axis=1)
+    
+    y_train=pd.read_csv(y_Trainpath)
+    if y_train.shape[0] == 0:
+        y_train_del=pd.read_csv(y_Trainpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        y_train_del=y_train.drop(delcol, axis=1)
+    
+    x_test=pd.read_csv(x_Testpath)
+    if x_test.shape[0] == 0:
+        x_test_del=pd.read_csv(x_Testpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        x_test_del=x_test.drop(delcol, axis=1)
+        
+    y_test=pd.read_csv(y_Testpath)
+    if y_test.shape[0] == 0:
+        y_test_del=pd.read_csv(y_Testpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        y_test_del=y_test.drop(delcol, axis=1)
+
+    input_path["x_train_path_del"] = os.path.join(data_folder, "x_Train_del.csv")
+    input_path["y_train_path_del"] = os.path.join(data_folder, "y_Train_del.csv")
+    input_path["x_test_path_del"] = os.path.join(data_folder, "x_test_del.csv")
+    input_path["y_test_path_del"] = os.path.join(data_folder, "y_test_del.csv")
+    save_config(input_file_path, input_path, mylog)
+    
+    x_train_del.to_csv(input_path["x_train_path_del"], index=False)
+    y_train_del.to_csv(input_path["y_train_path_del"], index=False)
+    x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    y_test_del.to_csv(input_path["y_test_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Predict_Test.bat", cwd=r"D:/SVM/Modules")
+    
+    model_pls_predict_path = os.path.join(data_folder, "testPredResult.csv")
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_predict_path):
+                break
+            else:
+                time.sleep(n)
+    timer(10)
+    
+    
+def pls_merge_predict(data_folder):   
+    data_folder = os.path.abspath(data_folder)
+    #infile=open(r"D:/AVM/Modules/AVM_PLS_Predict_Test.bat", "w")#Opens the file
+    #batcode = r"start " + r"D:/AVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Predict_Test.bat", "w")#Opens the file
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    #subprocess.call("AVM_PLS_Predict_Test.bat", cwd=r"D:/AVM/Modules")
+    
+    input_path = read_path(data_folder)
+    input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log       
+    config = read_config(input_path["config_path"], mylog)
+    
+    x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+    #x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+    y_Trainpath=input_path["y_train_path"] #訓練資料集路徑
+    #y_Testpath=input_path["y_test_path"]
+    delcol = config["IDX"] 
+    
+    #20190611 avoid Unnamed column
+    x_train=pd.read_csv(x_Trainpath)
+    if x_train.shape[0] == 0:
+        x_train_del=pd.read_csv(x_Trainpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        x_train_del=x_train.drop(delcol, axis=1)
+    
+    y_train=pd.read_csv(y_Trainpath)
+    if y_train.shape[0] == 0:
+        y_train_del=pd.read_csv(y_Trainpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        y_train_del=y_train.drop(delcol, axis=1)
+
+    input_path["x_train_path_del"] = os.path.join(data_folder, "x_Train_del.csv")
+    input_path["y_train_path_del"] = os.path.join(data_folder, "y_Train_del.csv")
+    input_path["x_test_path_del"] = os.path.join(data_folder, "x_test_del.csv")
+    input_path["y_test_path_del"] = os.path.join(data_folder, "y_test_del.csv")
+    save_config(input_file_path, input_path, mylog)
+    
+    x_train_del.to_csv(input_path["x_train_path_del"], index=False)
+    y_train_del.to_csv(input_path["y_train_path_del"], index=False)
+    #x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    #y_test_del.to_csv(input_path["y_test_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Predict_Test.bat", cwd=r"D:/SVM/Modules")
+    
+    model_pls_predict_path = os.path.join(data_folder, "trainPredResult.csv")
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_predict_path):
+                break
+            else:
+                time.sleep(n)
+    timer(10)
+    
+def pls_batch_predict(data_folder):   
+    data_folder = os.path.abspath(data_folder)
+    #infile=open(r"D:/AVM/Modules/AVM_PLS_Predict_Test.bat", "w")#Opens the file
+    #batcode = r"start " + r"D:/AVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Predict_Test.bat", "w")#Opens the file
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    #subprocess.call("AVM_PLS_Predict_Test.bat", cwd=r"D:/AVM/Modules")
+    
+    input_path = read_path(data_folder)
+    input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log       
+    config = read_config(input_path["config_path"], mylog)
+    
+    #x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+    x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+    #y_Trainpath=input_path["y_train_path"] #訓練資料集路徑
+    y_Testpath=input_path["y_test_path"]
+    delcol = config["IDX"] 
+    
+    #20190611 avoid Unnamed column
+    """
+    x_train=pd.read_csv(x_Trainpath)
+    if x_train.shape[0] == 0:
+        x_train_del=pd.read_csv(x_Trainpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        x_train_del=x_train.drop(delcol, axis=1)
+    
+    y_train=pd.read_csv(y_Trainpath)
+    if y_train.shape[0] == 0:
+        y_train_del=pd.read_csv(y_Trainpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        y_train_del=y_train.drop(delcol, axis=1)
+    """
+    x_test=pd.read_csv(x_Testpath)
+    if x_test.shape[0] == 0:
+        x_test_del=pd.read_csv(x_Testpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        x_test_del=x_test.drop(delcol, axis=1)
+        
+    y_test=pd.read_csv(y_Testpath)
+    if y_test.shape[0] == 0:
+        y_test_del=pd.read_csv(y_Testpath,index_col=-1).drop(delcol, axis=1)       
+    else:
+        y_test_del=y_test.drop(delcol, axis=1)
+
+    input_path["x_train_path_del"] = os.path.join(data_folder, "x_Train_del.csv")
+    input_path["y_train_path_del"] = os.path.join(data_folder, "y_Train_del.csv")
+    input_path["x_test_path_del"] = os.path.join(data_folder, "x_test_del.csv")
+    input_path["y_test_path_del"] = os.path.join(data_folder, "y_test_del.csv")
+    save_config(input_file_path, input_path, mylog)
+    
+    #x_train_del.to_csv(input_path["x_train_path_del"], index=False)
+    #y_train_del.to_csv(input_path["y_train_path_del"], index=False)
+    x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    y_test_del.to_csv(input_path["y_test_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Predict_Test.bat", cwd=r"D:/SVM/Modules")
+    
+    model_pls_predict_path = os.path.join(data_folder, "testPredResult.csv")
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_predict_path):
+                break
+            else:
+                time.sleep(n)
+    timer(10)
+
+def pls_online_predict_x(data_folder, df_x_test):   
+    data_folder = os.path.abspath(data_folder)
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Predict_x.bat", "w")#Opens the file
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    
+    input_path = read_path(data_folder)
+    #input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])  
+    config = read_config(input_path["config_path"], mylog)
+    delcol = config["IDX"] 
+    
+    df_x_test_del=df_x_test.drop(delcol, axis=1)
+    """ 20190710 avoid save config simultaneously to permission denind
+    input_path["x_train_path_del"] = os.path.join(data_folder, "x_Train_del.csv")
+    input_path["y_train_path_del"] = os.path.join(data_folder, "y_Train_del.csv")
+    input_path["x_test_path_del"] = os.path.join(data_folder, "x_test_del.csv")
+    input_path["y_test_path_del"] = os.path.join(data_folder, "y_test_del.csv")
+    save_config(input_file_path, input_path, mylog)
+    """
+    #df_x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    df_x_test_del.to_csv(input_path["x_train_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Predict_x.bat", cwd=r"D:/SVM/Modules")
+    
+    model_pls_predict_path = os.path.join(data_folder, "trainPredResult.csv")
+    print(model_pls_predict_path)
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_predict_path):
+                time.sleep(5) #20190708 for testPredResult.csv has exist
+                break
+            else:
+                time.sleep(n)
+    timer(5)
+
+def pls_online_predict_x_abnormal(data_folder, df_x_test):   
+    data_folder = os.path.abspath(data_folder)
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Predict_x_abnormal.bat", "w")#Opens the file
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    
+    input_path = read_path(data_folder)
+    #input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])  
+    config = read_config(input_path["config_path"], mylog)
+    delcol = config["IDX"] 
+    
+    df_x_test_del=df_x_test.drop(delcol, axis=1)
+    #df_x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    df_x_test_del.to_csv(input_path["x_train_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Predict_x_abnormal.bat", cwd=r"D:/SVM/Modules")
+    
+    model_pls_predict_path = os.path.join(data_folder, "trainPredResult.csv")
+    print(model_pls_predict_path)
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_predict_path):
+                time.sleep(5) #20190708 for testPredResult.csv has exist
+                break
+            else:
+                time.sleep(n)
+    timer(5)
+
+def pls_online_predict_x_many(data_folder, df_x_test):   
+    data_folder = os.path.abspath(data_folder)
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Predict_x_many.bat", "w")#Opens the file
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    
+    input_path = read_path(data_folder)
+    #input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])  
+    config = read_config(input_path["config_path"], mylog)
+    delcol = config["IDX"] 
+    
+    df_x_test_del=df_x_test.drop(delcol, axis=1)
+    #df_x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    df_x_test_del.to_csv(input_path["x_train_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Predict_x_many.bat", cwd=r"D:/SVM/Modules")
+    
+    model_pls_predict_path = os.path.join(data_folder, "trainPredResult.csv")
+    print(model_pls_predict_path)
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_predict_path):
+                time.sleep(5) #20190708 for testPredResult.csv has exist
+                break
+            else:
+                time.sleep(n)
+    timer(5)
+
+def pls_online_predict_x_many_abnormal(data_folder, df_x_test):   
+    data_folder = os.path.abspath(data_folder)
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Predict_x_many_abnormal.bat", "w")#Opens the file
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    
+    input_path = read_path(data_folder)
+    #input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])  
+    config = read_config(input_path["config_path"], mylog)
+    delcol = config["IDX"] 
+    
+    df_x_test_del=df_x_test.drop(delcol, axis=1)
+    #df_x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    df_x_test_del.to_csv(input_path["x_train_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Predict_x_many_abnormal.bat", cwd=r"D:/SVM/Modules")
+    
+    model_pls_predict_path = os.path.join(data_folder, "trainPredResult.csv")
+    print(model_pls_predict_path)
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_predict_path):
+                time.sleep(5) #20190708 for testPredResult.csv has exist
+                break
+            else:
+                time.sleep(n)
+    timer(5)
+
+def pls_online_predict_y(data_folder, df_x_test):   
+    data_folder = os.path.abspath(data_folder)
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Predict_y.bat", "w")#Opens the file
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    
+    input_path = read_path(data_folder)
+    #input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])  
+    config = read_config(input_path["config_path"], mylog)
+    delcol = config["IDX"] 
+    
+    df_x_test_del=df_x_test.drop(delcol, axis=1)
+    #df_x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    df_x_test_del.to_csv(input_path["x_train_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Predict_y.bat", cwd=r"D:/SVM/Modules")
+    
+    model_pls_predict_path = os.path.join(data_folder, "trainPredResult.csv")
+    print(model_pls_predict_path)
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_predict_path):
+                time.sleep(5) #20190708 for testPredResult.csv has exist
+                break
+            else:
+                time.sleep(n)
+    timer(5)
+
+def pls_online_predict_y_many(data_folder, df_x_test):   
+    data_folder = os.path.abspath(data_folder)
+    infile=open(r"D:/SVM/Modules/AVM_PLS_Predict_y_many.bat", "w")#Opens the file
+    batcode = r"start " + r"D:/SVM/Modules/AVM_PLS_Predict/AVM_PLS_Predict.exe " + data_folder + r"/file_path.json"
+    infile.write(batcode)#Writes the desired contents to the file
+    infile.close()#Closes the file    
+    
+    input_path = read_path(data_folder)
+    #input_file_path = os.path.join(data_folder, "file_path.json")
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])  
+    config = read_config(input_path["config_path"], mylog)
+    delcol = config["IDX"] 
+    
+    df_x_test_del=df_x_test.drop(delcol, axis=1)
+    #df_x_test_del.to_csv(input_path["x_test_path_del"], index=False)
+    df_x_test_del.to_csv(input_path["x_train_path_del"], index=False)
+    
+    subprocess.call("AVM_PLS_Predict_y_many.bat", cwd=r"D:/SVM/Modules")
+    
+    model_pls_predict_path = os.path.join(data_folder, "trainPredResult.csv")
+    print(model_pls_predict_path)
+    def timer(n):
+        while True:
+            if os.path.isfile(model_pls_predict_path):
+                time.sleep(5) #20190708 for testPredResult.csv has exist
+                break
+            else:
+                time.sleep(n)
+    timer(5)
+    
+#---------------------------------------------------------------------------------
+#Read.path.py
+# -*- coding: utf-8 -*-
+
+import json
+import os
+
+def Read_json(path):
+    try:
+        with open(path) as json_data:
+            file = json.load(json_data)
+        return file
+
+    except Exception as e:
+        import traceback
+        error_path = os.path.join(path, "error.log")
+        with open(error_path, 'a') as file:
+            file.write("Error while reading file_path.json")
+            file.write(traceback.format_exc())
+        raise
+        
+def read_path(folder_path):
+    input_file_path = os.path.join(folder_path, "file_path.json")
+    return Read_json(input_file_path)        
+
+#------------------------------------------------------------------
+#SmartVM_Constructor_dispatching.py
+# -*- coding: utf-8 -*-
+import time
+import os
+from DB_operation import select_project_creating, select_project_waitcreate, select_project_model_confirmok_o2m, select_project_model_confirmok_m2m 
+
+if __name__ == '__main__': 
+    def timer(n):
+        while True:     
+            #20190730 control process number, no execute while no model need training 
+            SVM_PROJECT_RUN = select_project_creating()
+            if len(SVM_PROJECT_RUN) < 17:
+                
+                SVM_PROJECT_WAITCREATE = select_project_waitcreate()
+                SVM_PROJECT_CONFIRMOK_O2M = select_project_model_confirmok_o2m()
+                SVM_PROJECT_CONFIRMOK_M2M = select_project_model_confirmok_m2m()
+                
+                if len(SVM_PROJECT_WAITCREATE) != 0:
+                    Execute = r"start SmartVM_Constructor.bat"
+                    os.system(Execute)
+                    print("open_finish_for_WAITCREATE")
+                    time.sleep(n)
+                    
+                elif len(SVM_PROJECT_CONFIRMOK_O2M) != 0:
+                    Execute = r"start SmartVM_Constructor.bat"
+                    os.system(Execute)
+                    print("open_finish_for_confirmok_o2m")
+                    time.sleep(n)
+                
+                elif len(SVM_PROJECT_CONFIRMOK_M2M) != 0:
+                    Execute = r"start SmartVM_Constructor.bat"
+                    os.system(Execute)
+                    print("open_finish_for_confirmok_m2m")
+                    time.sleep(n)
+                
+                else:
+                    print("no model need train")
+                    time.sleep(n)
+                                                                     
+            else:
+                print("train model full")
+                time.sleep(n*6)
+    timer(20)  
+    
+#-------------------------------------------------------------------
+#SmartVM_Constructor_mp_v3.py
+from Data_Preview import Data_Preview
+from Data_PreProcess import Data_PreProcess_Train, Data_PreProcess_Test
+from XDI import XDI_off_line_report, Build_XDI_Model
+from YDI import YDI_off_line_report, Build_YDI_Model
+from MXCI_MYCI_pre import pre_MXCI_MYCI
+from MXCI_MYCI import MXCI_MYCI_offline
+from Model_Selection import Model_Selection
+from XGB_model import xgb_tuning, xgb_build, xgb_predict, xgb_merge_tuning, xgb_merge_predict, xgb_batch_predict
+from PLS_model import pls_build, pls_predict, pls_merge_predict, pls_batch_predict
+from Read_path import read_path
+from config import read_config
+from CreateLog import WriteLog
+from DB_operation import DB_Connection, select_project_by_status, select_project_model_by_modelid, select_project_model_by_modelname, select_project_maxmodel_by_projectid, select_project_model_confirmok_o2m, select_project_model_confirmok_m2m, select_project_with_model_by_projectid, update_project_STATUS_by_projectid, update_project_model_modelstatus_by_modelid, update_project_model_modelstatus_modelstep_waitconfirm_by_modelid, update_project_model_mae_mape_by_modelid
+
+import os
+import json
+import traceback
+from Path import All_path
+from Data_Collector import Data_Collector
+# from Data_Check import Data_Check
+from Exclusion import DataRemove
+
+from shutil import copyfile
+import pandas as pd
+import time
+from json2csv import json2csv
+import zipfile
+#import multiprocessing as mp
+
+
+class SuperVM():
+    def __init__(self, sorce_dir, train_data_name, config_file_name, batch_data_name_list=None):
+        self.base_path = os.path.join("../Cases/", sorce_dir)
+        self.base_name = os.path.basename(os.path.abspath(self.base_path))
+        self.train_data_name = train_data_name
+        self.train_base, self.ext = os.path.splitext(self.train_data_name)
+        self.train_data = os.path.join(self.base_path, train_data_name)
+        self.config_file = os.path.join(self.base_path, config_file_name)
+        if batch_data_name_list:
+            self.batch_data = [os.path.join(self.base_path, x) for x in batch_data_name_list]
+        self.in_path = os.path.join(self.base_path, "path_config.json")
+        self.mdoel_dict = {}
+        self.mdoel_dict["3"] = {}
+        self.mdoel_dict["3"]["Train"] = Data_PreProcess_Train
+        self.mdoel_dict["3"]["Test"] = Data_PreProcess_Test       
+        self.mdoel_dict["4"] = {}
+        self.mdoel_dict["4"]["Train"] = Build_XDI_Model
+        self.mdoel_dict["4"]["Test"] = XDI_off_line_report
+        self.mdoel_dict["5"] = {}
+        self.mdoel_dict["5"]["Train"] = Build_YDI_Model
+        self.mdoel_dict["5"]["Test"] = YDI_off_line_report
+        self.mdoel_dict["8"] = {}
+        self.mdoel_dict["8"]["Train"] = pre_MXCI_MYCI
+        self.mdoel_dict["8"]["Test"] = MXCI_MYCI_offline
+        """
+        self.model_dict_pause = {}
+        self.model_dict_pause["1"] = {}
+        self.model_dict_pause["1"] = Data_Preview
+        Data_Preview(path_dict['2']["main"])
+        Data_PreProcess_Train(path_dict['3'][train_flag])
+        Data_PreProcess_Test(path_dict['3'][test_flag])
+        """
+        self.retrain_data = os.path.join(self.base_path, "retrain_data.csv")
+        if not os.path.exists(self.retrain_data):
+            copyfile(self.train_data, self.retrain_data)
+
+        # Other Variables initialized in methods
+        self.filter_feature = None
+        self.feature_lists = None
+        self.current_retrain_number = None
+        self.current_batch_number = None
+        self.path_config = None
+        self.filter_feature_dict = None
+        # self.filter_dir_path = None
+        self.filter_dir_name = None
+
+    def get_filter_feature(self):
+        try:
+            with open(self.config_file) as json_data:
+                config = json.load(json_data)
+        except Exception as e:
+            config = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading config file\n")
+                file.write(traceback.format_exc(e))
+                raise FileNotFoundError
+        self.filter_feature = config["Filter_Feature"]
+        
+        #20190626 remove
+        self.model_pred_name = config["Model_Pred_Name"]
+        #self.model_pred_name = ["XGB", "PLS"]
+        return None
+
+    def get_feature_content(self, split_flag=None):
+        try:
+            training_data = pd.read_csv(self.train_data)
+        except Exception as e:
+            training_data = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading raw data\n")
+                file.write(str(e) + "\n")
+                file.write(traceback.format_exc())
+                raise FileNotFoundError
+        self.feature_lists = training_data[self.filter_feature].unique().tolist()
+        self.feature_lists.sort()
+        if split_flag is not None:
+            self.filter_feature_dict = {}
+            for feature_list in self.feature_lists:
+                tmp_data = training_data[training_data[self.filter_feature] == feature_list].copy().reset_index(drop=True)
+                self.filter_feature_dict[feature_list] = \
+                    os.path.join(self.base_path, self.train_base + "_" + self.filter_feature + "_" + str(feature_list) + self.ext)
+                tmp_data.to_csv(self.filter_feature_dict[feature_list], index=False)
+        return None
+
+########################################################################################################################
+    def create_path(self, filter_path, path_config=None, batch_flag=None, retrain_folder_path=None, training_data=None):
+        if not os.path.exists(filter_path):
+            os.makedirs(filter_path)
+        #######
+        if os.path.exists(self.in_path):
+            self.get_saved_path_config()
+            path_config = self.path_config
+        #######
+        path = All_path(filter_path, self.config_file, path_config)
+        if batch_flag is None:
+            if training_data is None:
+                training_data = self.train_data
+            path.init_train(training_data=training_data)
+            path.init_merge()
+            self.current_retrain_number = path.get_current_retrain_number()
+        else:
+            path.init_batch(self.batch_data, retrain_folder_path)
+            self.current_batch_number = path.get_current_batch_number(retrain_folder_path)
+        return path.get_path_config()
+
+    def save_path_config(self):
+        with open(self.in_path, 'w') as fp:
+            json.dump(self.path_config, fp, indent=4, sort_keys=True)
+        return None
+
+    def create_many_path(self, batch_flag=None, training_data_dict=None):
+        if batch_flag is None:
+            self.path_config = None
+        # self.filter_dir_path = {}
+        self.filter_dir_name = {}
+        for feature_list in self.feature_lists:
+            if training_data_dict is None:
+                training_data = self.train_data
+            else:
+                training_data = training_data_dict[feature_list]
+
+            # self.filter_dir_path[feature_list] = \
+            #     os.path.join(self.base_path, self.base_name + "_" + self.filter_feature + "_" + str(feature_list))
+            self.filter_dir_name[feature_list] = self.base_name + "_" + self.filter_feature + "_" + str(feature_list)
+            filter_dir_path = os.path.join(self.base_path, self.filter_dir_name[feature_list])
+            self.path_config = self.create_path(filter_dir_path, self.path_config,
+                                                training_data=training_data)
+            if training_data_dict is not None:
+                os.remove(training_data)
+        self.save_path_config()
+        return None
+
+    def get_saved_path_config(self):
+        try:
+            with open(self.in_path) as json_data:
+                self.path_config = json.load(json_data)
+        except Exception as e:
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading path_config.json")
+                file.write(traceback.format_exc(e))
+            raise FileNotFoundError
+        return None
+
+########################################################################################################################
+    def get_max_retrain_num(self, retrain_num=None):
+        if retrain_num is None:
+            try:
+                first_key = list(self.path_config.keys())[0]
+                key_list = list(self.path_config[first_key].keys())
+                key_list.remove("main")
+                return max([int(x) for x in key_list])
+            except:
+                try:
+                    self.get_saved_path_config()
+                    first_key = list(self.path_config.keys())[0]
+                    key_list = list(self.path_config[first_key].keys())
+                    key_list.remove("main")
+                    return max([int(x) for x in key_list])
+                except Exception as e:
+                    raise FileNotFoundError("path_config not found")
+        else:
+            return retrain_num
+
+    def get_max_batch_num(self, retrain_num, batch_num=None):
+        if batch_num is None:
+            first_key = list(self.path_config.keys())[0]
+            key_list = list(self.path_config[first_key][str(retrain_num)].keys())
+            key_list.remove("main")
+            return max([int(x) for x in key_list])
+        else:
+            return batch_num
+        
+    def zip_project(self, project_id):
+        
+        SourcePath = os.path.join("D:/SVM/Cases/", str(project_id))
+        Sourcefoldername = str(project_id)
+        ZipTopath = r"D:\SVM\model_out"
+        
+        os.chdir(ZipTopath)
+        
+        def zipdir(path, ziph):
+            # ziph is zipfile handle
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    ziph.write(os.path.join(root, file))
+                    
+        zipf = zipfile.ZipFile(str(Sourcefoldername) + '.zip', 'w', zipfile.ZIP_DEFLATED)
+        zipdir(SourcePath, zipf)
+        zipf.close()
+
+    def model(self, path_dict, merge_flag=None):
+        if merge_flag is None:
+            base_num = 0
+            xgb_tuning(path_dict['6']["XGB"][str(base_num)])
+            xgb_build(path_dict['6']["XGB"][str(base_num+1)])
+            xgb_predict(path_dict['6']["XGB"][str(base_num+2)])
+            
+            #20190626 temporarily mark
+            pls_build(path_dict['6']["PLS"][str(base_num+1)])
+            pls_predict(path_dict['6']["PLS"][str(base_num+2)])
+            
+            input_path = read_path(path_dict['6']["PLS"][str(base_num+2)])
+            mylog = WriteLog(input_path["log_path"], input_path["error_path"])     
+            config = read_config(input_path["config_path"], mylog)
+            
+            x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+            x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+            delcol = config["IDX"] 
+            pls_y_name = config["Y"][0]+"_pred_PLS" #20190710 read config y 
+                      
+            train=pd.read_csv(x_Trainpath)
+            test=pd.read_csv(x_Testpath)
+            sheet_train = train[delcol]
+            sheet_test = test[delcol]
+            
+            pls_predict_train_path = os.path.join(path_dict['6']["PLS"][str(base_num+2)], "trainPredResult.csv")
+            pls_predict_test_path = os.path.join(path_dict['6']["PLS"][str(base_num+2)], "testPredResult.csv")
+            
+            xgb_predict_train_path = os.path.join(path_dict['6']["XGB"][str(base_num+2)], "trainPredResult.csv")
+            xgb_predict_test_path = os.path.join(path_dict['6']["XGB"][str(base_num+2)], "testPredResult.csv")
+            
+            #20190626 temporarily mark
+            pls_train=pd.read_csv(pls_predict_train_path)
+            pls_test=pd.read_csv(pls_predict_test_path)
+            #pls_train=pd.read_csv(xgb_predict_train_path)
+            #pls_test=pd.read_csv(xgb_predict_test_path)            
+            #pls_train['Value_pred_XGB'] = pls_train['Value_pred_XGB']*1.2
+            #pls_test['Value_pred_XGB'] = pls_test['Value_pred_XGB']*1.2
+            
+            #20190626 temporarily mark
+            pls_train.rename({'Y_pred': pls_y_name}, axis=1, inplace=True)
+            pls_test.rename({'Y_pred': pls_y_name}, axis=1, inplace=True)
+            #pls_train.rename({'Value_pred_XGB': 'Value_pred_PLS'}, axis=1, inplace=True)
+            #pls_test.rename({'Value_pred_XGB': 'Value_pred_PLS'}, axis=1, inplace=True)
+            
+            #20190626 temporarily mark
+            output_train = pd.concat([sheet_train,pls_train],axis=1)
+            output_test = pd.concat([sheet_test,pls_test],axis=1)
+            output_train.to_csv(pls_predict_train_path, index=False) 
+            output_test.to_csv(pls_predict_test_path, index=False) 
+            #pls_train.to_csv(pls_predict_train_path, index=False) 
+            #pls_test.to_csv(pls_predict_test_path, index=False) 
+        else:
+            base_num = 3
+            xgb_merge_tuning(path_dict['6']["XGB"][str(base_num)])
+            xgb_build(path_dict['6']["XGB"][str(base_num+1)])
+            xgb_merge_predict(path_dict['6']["XGB"][str(base_num+2)])
+            
+            #20190626 temporarily mark
+            pls_build(path_dict['6']["PLS"][str(base_num+1)])
+            pls_merge_predict(path_dict['6']["PLS"][str(base_num+2)])
+            
+            input_path = read_path(path_dict['6']["PLS"][str(base_num+2)])
+            mylog = WriteLog(input_path["log_path"], input_path["error_path"])   
+            config = read_config(input_path["config_path"], mylog)
+            
+            x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+            delcol = config["IDX"] 
+            pls_y_name = config["Y"][0]+"_pred_PLS"
+            
+            train=pd.read_csv(x_Trainpath)
+            sheet_train = train[delcol]
+            
+            pls_predict_train_path = os.path.join(path_dict['6']["PLS"][str(base_num+2)], "trainPredResult.csv")
+            xgb_predict_train_path = os.path.join(path_dict['6']["XGB"][str(base_num+2)], "trainPredResult.csv")
+            
+            #20190626 temporarily mark
+            pls_train=pd.read_csv(pls_predict_train_path)
+            #pls_train=pd.read_csv(xgb_predict_train_path)
+            #pls_train['Value_pred_XGB'] = pls_train['Value_pred_XGB']*1.2
+            
+            #20190626 temporarily mark
+            pls_train.rename({'Y_pred': pls_y_name}, axis=1, inplace=True)
+            #pls_train.rename({'Value_pred_XGB': 'Value_pred_PLS'}, axis=1, inplace=True)
+            
+            #20190626 temporarily mark
+            output_train = pd.concat([sheet_train,pls_train],axis=1)
+            output_train.to_csv(pls_predict_train_path, index=False)   
+            #pls_train.to_csv(pls_predict_train_path, index=False)
+
+    def model_predict(self, path_dict):
+        xgb_batch_predict(path_dict['6']["XGB"]["main"])           
+        pls_batch_predict(path_dict['6']["PLS"]["main"])
+        
+        input_path = read_path(path_dict['6']["PLS"]["main"])
+        mylog = WriteLog(input_path["log_path"], input_path["error_path"])    
+        config = read_config(input_path["config_path"], mylog)
+            
+        x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+        delcol = config["IDX"] 
+            
+        test=pd.read_csv(x_Testpath)
+        sheet_test = test[delcol]
+        
+        pls_predict_test_path = os.path.join(path_dict['6']["PLS"]["main"], "testPredResult.csv")
+        pls_test=pd.read_csv(pls_predict_test_path)
+        pls_test.rename({'Y_pred': 'Value_pred_PLS'}, axis=1, inplace=True)
+            
+        output_test = pd.concat([sheet_test,pls_test],axis=1)
+        output_test.to_csv(pls_predict_test_path, index=False)
+
+        return None
+
+    def training_phase(self, project_id, dc_instance, retrain_num, batch_num=None):
+        #retrain_num = self.get_max_retrain_num(retrain_num)
+        #batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+        retrain_num = 0
+        batch_num = 0
+        path_dict = self.path_config[self.base_name][str(retrain_num)][str(batch_num)]
+        
+        cnxn2 = DB_Connection()
+        
+        SVM_PP_MODEL = select_project_with_model_by_projectid(project_id)
+        
+        train_flag = '0'
+        test_flag = '1'
+        Data_Preview_status = Data_Preview(path_dict['2']["main"])
+        
+        input_path = read_path(path_dict['2']["main"])
+        mylog = WriteLog(input_path["log_path"], input_path["error_path"])  
+        
+        json2csv(input_path["config_path"]) #20190702 update and output config.csv
+        dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="DataPreview",
+                                         retrain_num=retrain_num, batch_num=batch_num)       
+        
+        # FeatureExclude(path_dict['2']["main"])
+        print(Data_Preview_status)
+        if Data_Preview_status == "NG":
+                
+            cursor1 = cnxn2.cursor()
+            cursor1.execute("UPDATE SVM_PROJECT_MODEL SET MODEL_SEQ = ?, MODEL_STATUS = ?, BATCH_SEQ = ?, IS_ONLINE = ?, MODEL_STEP = ?, WAIT_CONFIRM = ? WHERE MODEL_ID = ?", str(retrain_num), '1', str(batch_num), 0 , '1', 1 , int(SVM_PP_MODEL.MODEL_ID[0]))
+            cnxn2.commit()
+            
+            time.sleep(10)
+            update_project_STATUS_by_projectid("CREATING_PAUSE", project_id) #20190729 Because NG, change project status, return function and not execute down   
+            
+            mylog.info("Data_Preview_status NG")
+            
+            return 1        
+        else:              
+            cursor1 = cnxn2.cursor()
+            cursor1.execute("UPDATE SVM_PROJECT_MODEL SET MODEL_SEQ = ?, MODEL_STATUS = ?, BATCH_SEQ = ?, IS_ONLINE = ?, MODEL_STEP = ?, WAIT_CONFIRM = ? WHERE MODEL_ID = ?", str(retrain_num), '1', str(batch_num), 0, '1', 0, int(SVM_PP_MODEL.MODEL_ID[0]))
+            cnxn2.commit()           
+
+        Data_PreProcess_Train(path_dict['3'][train_flag])
+        Data_PreProcess_Test(path_dict['3'][test_flag])
+        
+        update_project_model_modelstatus_by_modelid('2', SVM_PP_MODEL.MODEL_ID[0])
+
+        Build_XDI_Model(path_dict['4'][train_flag])
+        XDI_off_line_report(path_dict['4'][test_flag], mode="Train")
+        
+        json2csv(input_path["config_path"])        
+        dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="XDI",
+                                         retrain_num=retrain_num, batch_num=batch_num)
+
+        Build_YDI_Model(path_dict['5'][train_flag])
+        YDI_off_line_report_status = YDI_off_line_report(path_dict['5'][test_flag], mode="Train")
+        
+        json2csv(input_path["config_path"])
+        dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="YDI",
+                                         retrain_num=retrain_num, batch_num=batch_num)
+        
+        
+        if YDI_off_line_report_status == "NG":
+            update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('3', '3', 1, SVM_PP_MODEL.MODEL_ID[0])
+            
+            update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)
+            
+            mylog.info("YDI_off_line_report_status NG")
+            
+            return 1
+            """    
+            def timer(n):
+                while True:
+                    return_confirm = select_project_model_by_modelid(SVM_PP_MODEL.MODEL_ID[0])
+                    if str(return_confirm.WAIT_CONFIRM[0]) == "False":
+                        break
+                    else:
+                        time.sleep(n)
+            timer(10)
+            """
+        else:
+            update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('3', '3', 0, SVM_PP_MODEL.MODEL_ID[0])
+        
+        dataremove_xdi_status, dataremove_xdi_msg = DataRemove(path_dict['4']["1"], "XDI")  #20190703 remove after step3
+        dataremove_ydi_status, dataremove_ydi_msg = DataRemove(path_dict['5']["1"], "YDI")  #20190703 remove after step3
+                 
+        self.model(path_dict)
+        json2csv(input_path["config_path"])
+        dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="Model",
+                                         retrain_num=retrain_num, batch_num=batch_num)
+        
+        update_project_model_modelstatus_by_modelid('4', SVM_PP_MODEL.MODEL_ID[0])
+
+        msg_Model, win = Model_Selection(path_dict['7'][train_flag], mode="Train")
+        output_paths = {}
+        
+        json2csv(input_path["config_path"])        
+        dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="SelectModel",
+                                         retrain_num=retrain_num, batch_num=batch_num)
+        
+        if msg_Model == "NG":
+
+            update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('5', '5', 1, SVM_PP_MODEL.MODEL_ID[0])
+            
+            update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)
+            
+            mylog.info("msg_Model NG")
+            
+            return 1
+            """    
+            def timer(n):
+                while True:
+
+                    return_confirm = select_project_model_by_modelid(SVM_PP_MODEL.MODEL_ID[0])
+                    if str(return_confirm.WAIT_CONFIRM[0]) == "False":
+                        break
+                    else:
+                        time.sleep(n)
+            timer(10)
+            """
+        else:
+            update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('5', '5', 0, SVM_PP_MODEL.MODEL_ID[0])
+        
+        #20190701 modify in the future(use XGB, PLS current),read config after user select 
+        if str(win).upper() == 'XGB':           
+            output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+            select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+            out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]            
+            update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+        elif str(win).upper() == 'PLS':
+            output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+            select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+            out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]            
+            update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+        else:
+            input_path = read_path(path_dict[str(7)]['0']) #20190710 avoid flat don't save mae mape to db
+            mylog = WriteLog(input_path["log_path"], input_path["error_path"])     
+            config = read_config(input_path["config_path"], mylog)  
+            Predict_Model = config["Model_Selection"][config["Y"][0]]["Predict_Model"]
+            
+            if str(Predict_Model).upper() == 'XGB':           
+                output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]               
+                update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+            elif str(Predict_Model).upper() == 'PLS':
+                output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]               
+                update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+
+        pre_mxci_myci_status, pre_mxci_myci_msg = pre_MXCI_MYCI(path_dict['8'][train_flag])
+        
+        update_project_model_modelstatus_by_modelid('6', SVM_PP_MODEL.MODEL_ID[0])
+        
+        mxci_myci_offline_status, mxci_myci_offline_msg = MXCI_MYCI_offline(path_dict['8'][test_flag], mode="Train")
+        json2csv(input_path["config_path"])
+        dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="CI",
+                                         retrain_num=retrain_num, batch_num=batch_num)
+        
+        update_project_model_modelstatus_by_modelid('7', SVM_PP_MODEL.MODEL_ID[0])
+        return None
+    
+    def training_phase_pause(self, project_id, dc_instance, retrain_num, batch_num=None):
+        #retrain_num = self.get_max_retrain_num(retrain_num)
+        #batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+        retrain_num = 0
+        batch_num = 0
+        
+        path_dict = self.path_config[self.base_name][str(retrain_num)][str(batch_num)]
+        
+        #cnxn2 = DB_Connection()
+        
+        SVM_PP_MODEL = select_project_with_model_by_projectid(project_id)
+        
+        train_flag = '0'
+        test_flag = '1'
+        input_path = read_path(path_dict['2']["main"])
+        mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+        
+        #20190731 check step1 3 5, update creating_run and test
+        
+        #Data_Preview_status = Data_Preview(path_dict['2']["main"])
+                
+        #json2csv(input_path["config_path"]) #20190702 update and output config.csv
+        #dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="DataPreview",
+        #                                 retrain_num=retrain_num, batch_num=batch_num)       
+        
+        # FeatureExclude(path_dict['2']["main"])
+        if SVM_PP_MODEL.MODEL_STEP[0] == '1':
+            if str(SVM_PP_MODEL.WAIT_CONFIRM[0]) == 'True':
+                time.sleep(10) #20190802 avoid execute the same project
+                update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)                                
+                return 1
+            else:
+                Data_PreProcess_Train(path_dict['3'][train_flag])
+                Data_PreProcess_Test(path_dict['3'][test_flag])
+                
+                update_project_model_modelstatus_by_modelid('2', SVM_PP_MODEL.MODEL_ID[0])
+        
+                Build_XDI_Model(path_dict['4'][train_flag])
+                XDI_off_line_report(path_dict['4'][test_flag], mode="Train")
+                
+                json2csv(input_path["config_path"])        
+                dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="XDI",
+                                                 retrain_num=retrain_num, batch_num=batch_num)
+        
+                Build_YDI_Model(path_dict['5'][train_flag])
+                YDI_off_line_report_status = YDI_off_line_report(path_dict['5'][test_flag], mode="Train")
+                
+                json2csv(input_path["config_path"])
+                dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="YDI",
+                                                 retrain_num=retrain_num, batch_num=batch_num)
+                                
+                if YDI_off_line_report_status == "NG":
+                    update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('3', '3', 1, SVM_PP_MODEL.MODEL_ID[0])
+                    
+                    update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)
+                    
+                    mylog.info("YDI_off_line_report_status pause NG1")
+                    
+                    return 1
+                else:
+                    update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('3', '3', 0, SVM_PP_MODEL.MODEL_ID[0])
+                
+                dataremove_xdi_status, dataremove_xdi_msg = DataRemove(path_dict['4']["1"], "XDI")  #20190703 remove after step3
+                dataremove_ydi_status, dataremove_ydi_msg = DataRemove(path_dict['5']["1"], "YDI")  #20190703 remove after step3
+                         
+                self.model(path_dict)
+                json2csv(input_path["config_path"])
+                dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="Model",
+                                                 retrain_num=retrain_num, batch_num=batch_num)
+                
+                update_project_model_modelstatus_by_modelid('4', SVM_PP_MODEL.MODEL_ID[0])
+        
+                msg_Model, win = Model_Selection(path_dict['7'][train_flag], mode="Train")
+                output_paths = {}
+                
+                json2csv(input_path["config_path"])        
+                dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="SelectModel",
+                                                 retrain_num=retrain_num, batch_num=batch_num)
+                
+                if msg_Model == "NG":
+        
+                    update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('5', '5', 1, SVM_PP_MODEL.MODEL_ID[0])
+                    
+                    update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)
+                    
+                    mylog.info("msg_Model pause NG1")
+                    
+                    return 1
+                else:
+                    update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('5', '5', 0, SVM_PP_MODEL.MODEL_ID[0])
+                
+                #20190701 modify in the future(use XGB, PLS current),read config after user select 
+                if str(win).upper() == 'XGB':           
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]            
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+                elif str(win).upper() == 'PLS':
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]            
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+                else:
+                    input_path = read_path(path_dict[str(7)]['0']) #20190710 avoid flat don't save mae mape to db
+                    mylog = WriteLog(input_path["log_path"], input_path["error_path"])     
+                    config = read_config(input_path["config_path"], mylog)  
+                    Predict_Model = config["Model_Selection"][config["Y"][0]]["Predict_Model"]
+                    
+                    if str(Predict_Model).upper() == 'XGB':           
+                        output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                        select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                        out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]               
+                        update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+                    elif str(Predict_Model).upper() == 'PLS':
+                        output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                        select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                        out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]               
+                        update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+        
+                pre_mxci_myci_status, pre_mxci_myci_msg = pre_MXCI_MYCI(path_dict['8'][train_flag])
+                
+                update_project_model_modelstatus_by_modelid('6', SVM_PP_MODEL.MODEL_ID[0])
+                
+                mxci_myci_offline_status, mxci_myci_offline_msg = MXCI_MYCI_offline(path_dict['8'][test_flag], mode="Train")
+                json2csv(input_path["config_path"])
+                dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="CI",
+                                                 retrain_num=retrain_num, batch_num=batch_num)
+                
+                update_project_model_modelstatus_by_modelid('7', SVM_PP_MODEL.MODEL_ID[0])
+                
+                            
+        elif SVM_PP_MODEL.MODEL_STEP[0] == '3':
+            if str(SVM_PP_MODEL.WAIT_CONFIRM[0]) == 'True':
+                time.sleep(10)
+                update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)
+                return 1
+            else:
+                dataremove_xdi_status, dataremove_xdi_msg = DataRemove(path_dict['4']["1"], "XDI")  #20190703 remove after step3
+                dataremove_ydi_status, dataremove_ydi_msg = DataRemove(path_dict['5']["1"], "YDI")  #20190703 remove after step3
+                         
+                self.model(path_dict)
+                json2csv(input_path["config_path"])
+                dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="Model",
+                                                 retrain_num=retrain_num, batch_num=batch_num)
+                
+                update_project_model_modelstatus_by_modelid('4', SVM_PP_MODEL.MODEL_ID[0])
+        
+                msg_Model, win = Model_Selection(path_dict['7'][train_flag], mode="Train")
+                output_paths = {}
+                
+                json2csv(input_path["config_path"])        
+                dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="SelectModel",
+                                                 retrain_num=retrain_num, batch_num=batch_num)
+                
+                if msg_Model == "NG":
+        
+                    update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('5', '5', 1, SVM_PP_MODEL.MODEL_ID[0])
+                    
+                    update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)
+                    
+                    mylog.info("msg_Model pause NG2")
+                    
+                    return 1
+                else:
+                    update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('5', '5', 0, SVM_PP_MODEL.MODEL_ID[0])
+                
+                #20190701 modify in the future(use XGB, PLS current),read config after user select 
+                if str(win).upper() == 'XGB':           
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]            
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+                elif str(win).upper() == 'PLS':
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]            
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+                else:
+                    input_path = read_path(path_dict[str(7)]['0']) #20190710 avoid flat don't save mae mape to db
+                    mylog = WriteLog(input_path["log_path"], input_path["error_path"])     
+                    config = read_config(input_path["config_path"], mylog)  
+                    Predict_Model = config["Model_Selection"][config["Y"][0]]["Predict_Model"]
+                    
+                    if str(Predict_Model).upper() == 'XGB':           
+                        output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                        select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                        out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]               
+                        update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+                    elif str(Predict_Model).upper() == 'PLS':
+                        output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                        select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                        out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]               
+                        update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+        
+                pre_mxci_myci_status, pre_mxci_myci_msg = pre_MXCI_MYCI(path_dict['8'][train_flag])
+                
+                update_project_model_modelstatus_by_modelid('6', SVM_PP_MODEL.MODEL_ID[0])
+                
+                mxci_myci_offline_status, mxci_myci_offline_msg = MXCI_MYCI_offline(path_dict['8'][test_flag], mode="Train")
+                json2csv(input_path["config_path"])
+                dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="CI",
+                                                 retrain_num=retrain_num, batch_num=batch_num)
+                
+                update_project_model_modelstatus_by_modelid('7', SVM_PP_MODEL.MODEL_ID[0])
+            
+        
+        elif SVM_PP_MODEL.MODEL_STEP[0] == '5':
+            if str(SVM_PP_MODEL.WAIT_CONFIRM[0]) == 'True':
+                time.sleep(10)
+                update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)
+                return 1
+            else:
+                """
+                if str(win).upper() == 'XGB':           
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]            
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+                elif str(win).upper() == 'PLS':
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]            
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+                else:
+                """
+                output_paths = {}
+                input_path = read_path(path_dict[str(7)]['0']) #20190710 avoid flat don't save mae mape to db
+                mylog = WriteLog(input_path["log_path"], input_path["error_path"])     
+                config = read_config(input_path["config_path"], mylog)  
+                Predict_Model = config["Model_Selection"][config["Y"][0]]["Predict_Model"]
+                
+                if str(Predict_Model).upper() == 'XGB':           
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]               
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+                elif str(Predict_Model).upper() == 'PLS':
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict['7'][train_flag], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]               
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PP_MODEL.MODEL_ID[0])
+        
+                pre_mxci_myci_status, pre_mxci_myci_msg = pre_MXCI_MYCI(path_dict['8'][train_flag])
+                
+                update_project_model_modelstatus_by_modelid('6', SVM_PP_MODEL.MODEL_ID[0])
+                
+                mxci_myci_offline_status, mxci_myci_offline_msg = MXCI_MYCI_offline(path_dict['8'][test_flag], mode="Train")
+                json2csv(input_path["config_path"])
+
+                dc_instance.one_to_all_collector(path_config=self.path_config, base_name=self.base_name, situation="CI",
+                                                 retrain_num=retrain_num, batch_num=batch_num)
+                
+                update_project_model_modelstatus_by_modelid('7', SVM_PP_MODEL.MODEL_ID[0])
+                            
+        return None
+        
+    def merge_phase(self, base_name, retrain_num, batch_num=None):
+        #retrain_num = self.get_max_retrain_num(retrain_num)
+        #batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+        retrain_num = 0
+        batch_num = 0
+        path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+
+        print("MERGE phase")
+        merge_flag = '2'
+        test_flag = '3'
+
+        Data_PreProcess_Train(path_dict['3'][merge_flag], merge_flag=True)
+        Build_XDI_Model(path_dict['4'][merge_flag])
+        XDI_off_line_report(path_dict['4'][test_flag], mode="Merge")
+        Build_YDI_Model(path_dict['5'][merge_flag])
+        YDI_off_line_report(path_dict['5'][test_flag], mode="Merge")
+
+        self.model(path_dict, merge_flag=True)
+        Model_Selection(path_dict['7']['1'], mode="Merge")
+        pre_MXCI_MYCI(path_dict['8'][merge_flag])
+        MXCI_MYCI_offline(path_dict['8'][test_flag],  mode="Merge")
+
+        return None
+
+    def module_for_loop(self, model_num, retrain_num, batch_num, dc):
+        train_flag = '0'
+        test_flag = '1'
+        Step5_NG = 0
+        Step5_count = 1 
+        #cnxn2 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+        
+        for feature in self.feature_lists:
+            
+            print(model_num, self.filter_feature, feature)
+            
+            SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[feature]) #m2m modelname = self.filter_dir_name[feature]
+            project_id = SVM_PROJECT_MODEL.PROJECT_ID[0]
+            
+            path_dict = self.path_config[self.filter_dir_name[feature]][str(retrain_num)][str(batch_num)]            
+            input_path = read_path(path_dict[str(3)]['0'])
+            mylog = WriteLog(input_path["log_path"], input_path["error_path"]) 
+                        
+            if model_num == 3:
+                self.mdoel_dict[str(model_num)]["Train"](path_dict[str(model_num)][train_flag])
+                self.mdoel_dict[str(model_num)]["Test"](path_dict[str(model_num)][test_flag])
+                json2csv(input_path["config_path"])
+            elif model_num == 5:
+                self.mdoel_dict[str(model_num)]["Train"](path_dict[str(model_num)][train_flag])
+                YDI_off_line_report_status = self.mdoel_dict[str(model_num)]["Test"](path_dict[str(model_num)][test_flag], mode="Train")
+                json2csv(input_path["config_path"])
+                
+                if YDI_off_line_report_status == "NG":
+                    Step5_NG = 1
+                update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('3', '3', 0, SVM_PROJECT_MODEL.MODEL_ID[0])               
+                
+                if Step5_count == len(self.feature_lists):
+                    dc.YDI_collector(path_config=self.path_config, filter_dir_name=self.filter_dir_name,
+                         retrain_num=retrain_num, batch_num=batch_num,
+                         feature_lists=self.feature_lists, merge_flag=None)
+                    if Step5_NG == 1:
+                        
+                       update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('3', '3', 1, SVM_PROJECT_MODEL.MODEL_ID[0])
+                       
+                       update_project_STATUS_by_projectid("CREATING_PAUSE", project_id) #20190729 Because NG, change project status, return function and not execute down 
+                       
+                       mylog.info("Wait user check YDI NG!!!")
+                       
+                       return 1
+                       """     
+                       def timer(n):
+                           while True:
+                               return_confirm = select_project_model_by_modelname(self.filter_dir_name[feature])
+                               if str(return_confirm.WAIT_CONFIRM[0]) == "False":
+                                   break
+                               else:
+                                   time.sleep(n)
+                       timer(10) 
+                       """
+                       dataremove_xdi_status, dataremove_xdi_msg = DataRemove(path_dict['4']["1"], "XDI")  #20190716 if YDI NG, wait user check and remove after step3
+                       dataremove_ydi_status, dataremove_ydi_msg = DataRemove(path_dict['5']["1"], "YDI")  #20190703 if YDI NG, wait user check and remove after step3
+            else:
+                self.mdoel_dict[str(model_num)]["Train"](path_dict[str(model_num)][train_flag])
+                self.mdoel_dict[str(model_num)]["Test"](path_dict[str(model_num)][test_flag], mode="Train")  
+
+            Step5_count = Step5_count+1                                          
+            
+        return None
+
+    def model_selection_for_loop(self, retrain_num, batch_num, dc):        
+        #xgb_win = 0
+        Step7_NG = 0
+        Step7_count = 1
+        
+        for feature in self.feature_lists:
+            path_dict = self.path_config[self.filter_dir_name[feature]][str(retrain_num)][str(batch_num)]
+            msg_Model, win = Model_Selection(path_dict[str(7)]['0'], mode="Train")
+            output_paths = {}
+            
+            SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[feature])
+            project_id = SVM_PROJECT_MODEL.PROJECT_ID[0]
+            
+            input_path = read_path(path_dict[str(7)]['0'])
+            mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+            json2csv(input_path["config_path"])
+            
+            if msg_Model == "NG":
+                Step7_NG = 1
+            update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('5', '5', 0, SVM_PROJECT_MODEL.MODEL_ID[0])
+            
+            input_path = read_path(path_dict[str(7)]['0'])
+            mylog = WriteLog(input_path["log_path"], input_path["error_path"])     
+            config = read_config(input_path["config_path"], mylog)  
+            config["Model_Selection"][config["Y"][0]]["Predict_Model"]
+            
+            if Step7_count == len(self.feature_lists):
+                dc.Selection_collector(path_config=self.path_config, filter_dir_name=self.filter_dir_name,
+                               retrain_num=retrain_num, batch_num=batch_num,
+                               feature_lists=self.feature_lists, merge_flag=None)
+                if Step7_NG == 1:
+                   update_project_model_modelstatus_modelstep_waitconfirm_by_modelid('5', '5', 1, SVM_PROJECT_MODEL.MODEL_ID[0])
+                   
+                   update_project_STATUS_by_projectid("CREATING_PAUSE", project_id) #20190729 Because NG, change project status, return function and not execute down 
+                   
+                   mylog.info("Wait user select model!!!")
+                   
+                   return 1
+                   """
+                   def timer(n):
+                       while True:
+                           return_confirm = select_project_model_by_modelname(self.filter_dir_name[feature])
+                           if str(return_confirm.WAIT_CONFIRM[0]) == "False":
+                               break
+                           else:
+                               time.sleep(n)
+                   timer(10)
+                   """
+            #20190701 modify in the future(use XGB, PLS current)
+            if str(win).upper() == 'XGB':
+                #xgb_win = xgb_win+1                
+                output_paths["Model_Selection_Report"] = os.path.join(path_dict[str(7)]['0'], "Model_Selection_Report.csv")
+                select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]                
+                update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PROJECT_MODEL.MODEL_ID[0])
+            elif str(win).upper() == 'PLS':
+                output_paths["Model_Selection_Report"] = os.path.join(path_dict[str(7)]['0'], "Model_Selection_Report.csv")
+                select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]                
+                update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PROJECT_MODEL.MODEL_ID[0])
+            else:
+                input_path = read_path(path_dict[str(7)]['0']) #20190710 avoid flat don't save mae mape to db
+                mylog = WriteLog(input_path["log_path"], input_path["error_path"])     
+                config = read_config(input_path["config_path"], mylog)  
+                Predict_Model = config["Model_Selection"][config["Y"][0]]["Predict_Model"]
+                
+                if str(Predict_Model).upper() == 'XGB':
+                    #xgb_win = xgb_win+1                
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict[str(7)]['0'], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Test')]                
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PROJECT_MODEL.MODEL_ID[0])
+                elif str(Predict_Model).upper() == 'PLS':
+                    output_paths["Model_Selection_Report"] = os.path.join(path_dict[str(7)]['0'], "Model_Selection_Report.csv")
+                    select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+                    out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Test')]                
+                    update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PROJECT_MODEL.MODEL_ID[0])
+                                              
+            Step7_count = Step7_count+1
+                                                     
+        return None
+
+    def many_merge_phase(self, retrain_num, batch_num):
+        for feature in self.feature_lists:
+            self.merge_phase(base_name=self.filter_dir_name[feature], retrain_num=retrain_num, batch_num=batch_num)
+        return None
+
+    def many_model_phase(self, retrain_num, batch_num):
+        for feature in self.feature_lists:
+            path_dict = self.path_config[self.filter_dir_name[feature]][str(retrain_num)][str(batch_num)]
+            self.model(path_dict)
+        return None
+
+    def many_to_many(self, project_id):
+        dc = Data_Collector(self.base_path, self.train_data, self.config_file)  #create Data_Collector folder, base.path=../Cases/PSH_Demo 
+        dc.create_file_path() # for DataPreview
+
+        Data_Preview_status = Data_Preview(dc.data_preview_path)
+        
+        self.get_filter_feature()
+        self.get_feature_content(split_flag=True)
+        self.create_many_path(training_data_dict=self.filter_feature_dict)
+                                         
+        #retrain_num = self.get_max_retrain_num(retrain_num=self.current_retrain_number)
+        #batch_num = self.get_max_batch_num(retrain_num=self.current_retrain_number, batch_num=None)
+        retrain_num = 0
+        batch_num = 0
+        
+        #20190618 judge Data_Preview_status in future
+        cnxn1 = DB_Connection()
+        for x in self.filter_dir_name.keys():
+
+            SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+            
+            cursor1 = cnxn1.cursor()
+            cursor1.execute("UPDATE SVM_PROJECT_MODEL SET MODEL_SEQ = ?, MODEL_STATUS = ?, BATCH_SEQ = ?, IS_ONLINE = ?, MODEL_STEP = ?, WAIT_CONFIRM = ? WHERE MODEL_ID = ?", str(retrain_num), '1', str(batch_num), 0, '1', 0, int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+            cnxn1.commit() 
+                
+        dc.init_collector_dir(retrain_num, batch_num)
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+        self.module_for_loop(model_num=3, retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+        
+        for x in self.filter_dir_name.keys():
+
+            SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+            update_project_model_modelstatus_by_modelid('2', SVM_PROJECT_MODEL.MODEL_ID[0])            
+          
+        self.module_for_loop(model_num=4, retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+        dc.XDI_collector(path_config=self.path_config, filter_dir_name=self.filter_dir_name,
+                         retrain_num=retrain_num, batch_num=batch_num,
+                         feature_lists=self.feature_lists, merge_flag=None)
+        step3_result = self.module_for_loop(model_num=5, retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+        if step3_result == 1:
+            return 1
+            
+        self.many_model_phase(retrain_num=retrain_num, batch_num=batch_num)           
+        dc.Model_collector(path_config=self.path_config, filter_dir_name=self.filter_dir_name,
+                           retrain_num=retrain_num, batch_num=batch_num, feature_name=self.filter_feature,
+                           feature_lists=self.feature_lists, merge_flag=None)
+        
+        for x in self.filter_dir_name.keys():
+
+            SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])            
+            update_project_model_modelstatus_by_modelid('4', SVM_PROJECT_MODEL.MODEL_ID[0])
+            
+        step5_result = self.model_selection_for_loop(retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+        if step5_result == 1:
+            return 1
+            
+        self.module_for_loop(model_num=8, retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+        
+        for x in self.filter_dir_name.keys():
+
+            SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+            update_project_model_modelstatus_by_modelid('6', SVM_PROJECT_MODEL.MODEL_ID[0])
+            
+        dc.CI_collector(path_config=self.path_config, filter_dir_name=self.filter_dir_name,
+                        retrain_num=retrain_num, batch_num=batch_num,
+                        feature_lists=self.feature_lists, merge_flag=None)
+        
+        for x in self.filter_dir_name.keys():
+
+            SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+            update_project_model_modelstatus_by_modelid('7', SVM_PROJECT_MODEL.MODEL_ID[0])
+
+        self.many_merge_phase(retrain_num=retrain_num, batch_num=batch_num)
+        self.many_data_porter(retrain_num=retrain_num, batch_num=batch_num, mode="Merge")
+        
+        cursor1 = cnxn1.cursor()
+        cursor1.execute("UPDATE SVM_PROJECT SET STATUS = ? WHERE PROJECT_ID = ?", "CREATED_OK", int(project_id))
+        cnxn1.commit() 
+        
+        self.zip_project(project_id)
+        
+        return None
+    
+
+    def many_to_many_pause(self, project_id):
+        dc = Data_Collector(self.base_path, self.train_data, self.config_file)  #create Data_Collector folder, base.path=../Cases/PSH_Demo 
+        #dc.create_file_path() # for DataPreview
+
+        #Data_Preview_status = Data_Preview(dc.data_preview_path)
+        
+        self.get_filter_feature()
+        self.get_feature_content(split_flag=True)
+        #self.create_many_path(training_data_dict=self.filter_feature_dict)
+                                         
+        #retrain_num = self.get_max_retrain_num(retrain_num=self.current_retrain_number)
+        #batch_num = self.get_max_batch_num(retrain_num=self.current_retrain_number, batch_num=None)
+        retrain_num = 0
+        batch_num = 0
+        
+        #20190618 judge Data_Preview_status in future
+        cnxn1 = DB_Connection()
+        """
+        for x in self.filter_dir_name.keys():
+
+            SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+            
+            cursor1 = cnxn1.cursor()
+            cursor1.execute("UPDATE SVM_PROJECT_MODEL SET MODEL_SEQ = ?, MODEL_STATUS = ?, BATCH_SEQ = ?, IS_ONLINE = ?, MODEL_STEP = ?, WAIT_CONFIRM = ? WHERE MODEL_ID = ?", str(retrain_num), '1', str(batch_num), 0, '1', 0, int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+            cnxn1.commit() 
+        """        
+        dc.init_collector_dir(retrain_num, batch_num)
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+        """
+        self.module_for_loop(model_num=3, retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+        
+        for x in self.filter_dir_name.keys():
+
+            SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+            update_project_model_modelstatus_by_modelid('2', SVM_PROJECT_MODEL.MODEL_ID[0])            
+          
+        self.module_for_loop(model_num=4, retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+        dc.XDI_collector(path_config=self.path_config, filter_dir_name=self.filter_dir_name,
+                         retrain_num=retrain_num, batch_num=batch_num,
+                         feature_lists=self.feature_lists, merge_flag=None)
+        
+        step3_result = self.module_for_loop(model_num=5, retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+        
+        if step3_result == 1:
+            return 1
+        """
+        SVM_MAXMODEL = select_project_maxmodel_by_projectid(project_id)
+        if SVM_MAXMODEL.MODEL_STEP[0] == '3':
+            if str(SVM_MAXMODEL.WAIT_CONFIRM[0]) == 'True':
+                time.sleep(10)
+                update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)
+                return 1
+            else:
+                self.many_model_phase(retrain_num=retrain_num, batch_num=batch_num)           
+                dc.Model_collector(path_config=self.path_config, filter_dir_name=self.filter_dir_name,
+                                   retrain_num=retrain_num, batch_num=batch_num, feature_name=self.filter_feature,
+                                   feature_lists=self.feature_lists, merge_flag=None)
+                
+                for x in self.filter_dir_name.keys():
+        
+                    SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])            
+                    update_project_model_modelstatus_by_modelid('4', SVM_PROJECT_MODEL.MODEL_ID[0])
+                    
+                step5_result = self.model_selection_for_loop(retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+                if step5_result == 1:
+                    return 1
+                    
+                self.module_for_loop(model_num=8, retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+                
+                for x in self.filter_dir_name.keys():
+        
+                    SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+                    update_project_model_modelstatus_by_modelid('6', SVM_PROJECT_MODEL.MODEL_ID[0])
+                    
+                dc.CI_collector(path_config=self.path_config, filter_dir_name=self.filter_dir_name,
+                                retrain_num=retrain_num, batch_num=batch_num,
+                                feature_lists=self.feature_lists, merge_flag=None)
+                
+                for x in self.filter_dir_name.keys():
+        
+                    SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+                    update_project_model_modelstatus_by_modelid('7', SVM_PROJECT_MODEL.MODEL_ID[0])
+        
+                self.many_merge_phase(retrain_num=retrain_num, batch_num=batch_num)
+                self.many_data_porter(retrain_num=retrain_num, batch_num=batch_num, mode="Merge")
+                
+                cursor1 = cnxn1.cursor()
+                cursor1.execute("UPDATE SVM_PROJECT SET STATUS = ? WHERE PROJECT_ID = ?", "CREATED_OK", int(project_id))
+                cnxn1.commit()
+                
+                self.zip_project(project_id)
+        
+        elif SVM_MAXMODEL.MODEL_STEP[0] == '5':
+            if str(SVM_MAXMODEL.WAIT_CONFIRM[0]) == 'True':
+                time.sleep(10)
+                update_project_STATUS_by_projectid("CREATING_PAUSE", project_id)
+                return 1
+            else:
+                self.module_for_loop(model_num=8, retrain_num=retrain_num, batch_num=batch_num, dc=dc)
+                
+                for x in self.filter_dir_name.keys():
+        
+                    SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+                    update_project_model_modelstatus_by_modelid('6', SVM_PROJECT_MODEL.MODEL_ID[0])
+                    
+                dc.CI_collector(path_config=self.path_config, filter_dir_name=self.filter_dir_name,
+                                retrain_num=retrain_num, batch_num=batch_num,
+                                feature_lists=self.feature_lists, merge_flag=None)
+                
+                for x in self.filter_dir_name.keys():
+        
+                    SVM_PROJECT_MODEL = select_project_model_by_modelname(self.filter_dir_name[x])
+                    update_project_model_modelstatus_by_modelid('7', SVM_PROJECT_MODEL.MODEL_ID[0])
+        
+                self.many_merge_phase(retrain_num=retrain_num, batch_num=batch_num)
+                self.many_data_porter(retrain_num=retrain_num, batch_num=batch_num, mode="Merge")
+                
+                cursor1 = cnxn1.cursor()
+                cursor1.execute("UPDATE SVM_PROJECT SET STATUS = ? WHERE PROJECT_ID = ?", "CREATED_OK", int(project_id))
+                cnxn1.commit()
+                
+                self.zip_project(project_id)
+             
+        return None
+        
+    def many_data_porter(self, retrain_num, batch_num, mode):
+        dc = Data_Collector(self.base_path, self.train_data, self.config_file)
+        dc.init_collector_dir(retrain_num, batch_num)
+        for feature in self.feature_lists:
+            dc.data_porter(path_config=self.path_config, base_name=self.filter_dir_name[feature],
+                           retrain_num=retrain_num, batch_num=batch_num, mode=mode,
+                           feature_name=self.filter_feature, feature=feature)
+        dc.data_organize(retrain_num, batch_num, mode,
+                         feature_name=self.filter_feature, feature_lists=self.feature_lists)
+        return None
+
+    def one_to_all(self, project_id):
+        path = os.path.join(self.base_path, self.base_name)
+        dc = Data_Collector(self.base_path, self.train_data, self.config_file)
+        self.path_config = self.create_path(path)
+        self.save_path_config()
+        
+        #retrain_num = self.get_max_retrain_num(retrain_num=self.current_retrain_number)
+        #batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        retrain_num = 0
+        batch_num = 0
+        
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+        dc.init_collector_dir(retrain_num, batch_num)
+        training_result = self.training_phase(project_id, retrain_num=self.current_retrain_number, dc_instance=dc)
+        if training_result == 1:
+            return 1
+        
+        self.merge_phase(base_name=self.base_name, retrain_num=retrain_num)
+        dc.data_porter(path_config=self.path_config, base_name=self.base_name,
+                       retrain_num=retrain_num, batch_num=batch_num, mode="Merge")
+        
+        cnxn1 = DB_Connection()
+        cursor1 = cnxn1.cursor()
+        cursor1.execute("UPDATE SVM_PROJECT SET STATUS = ? WHERE PROJECT_ID = ?", "CREATED_OK", int(project_id))
+        cnxn1.commit() 
+        
+        self.zip_project(project_id) #20190805 add zip file to D:\SVM\model_out for AI_365
+        
+        return None
+    
+    def one_to_all_pause(self, project_id):
+        #path = os.path.join(self.base_path, self.base_name)
+        dc = Data_Collector(self.base_path, self.train_data, self.config_file)
+        #self.path_config = self.create_path(path)
+        self.get_saved_path_config()
+        #self.save_path_config()
+        
+        #retrain_num = self.get_max_retrain_num(retrain_num=self.current_retrain_number)
+        #batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        retrain_num = 0
+        batch_num = 0
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+        dc.init_collector_dir(retrain_num, batch_num) #20190802 must execute for data collect
+        training_result = self.training_phase_pause(project_id, retrain_num=self.current_retrain_number, dc_instance=dc)
+        if training_result == 1:
+            return 1
+        
+        self.merge_phase(base_name=self.base_name, retrain_num=retrain_num)
+        dc.data_porter(path_config=self.path_config, base_name=self.base_name,
+                       retrain_num=retrain_num, batch_num=batch_num, mode="Merge")
+        
+        cnxn1 = DB_Connection()
+        cursor1 = cnxn1.cursor()
+        cursor1.execute("UPDATE SVM_PROJECT SET STATUS = ? WHERE PROJECT_ID = ?", "CREATED_OK", int(project_id))
+        cnxn1.commit() 
+        
+        self.zip_project(project_id)
+        
+        return None
+        
+if __name__ == '__main__':   
+    SVM_PP_MODEL = select_project_by_status("CREATED")
+    
+    if len(SVM_PP_MODEL) != 0:        
+
+        #pool=mp.Pool(16)
+        
+        #for a in range(len(SVM_PP_MODEL)):
+        project_id = SVM_PP_MODEL.PROJECT_ID[0]
+        #20190805 SVN error update status, avoid execute recycle
+        try:                
+            SVM = SuperVM(str(SVM_PP_MODEL.PROJECT_NAME[0]), str(SVM_PP_MODEL.UPLOAD_FILE[0]), r"Config.json")
+        except Exception as e:
+            print("SVM error 1")
+            update_project_STATUS_by_projectid("CREATING_ERROR", project_id)
+                               
+        update_project_STATUS_by_projectid("CREATING", project_id)
+        
+        print("------------")
+        print(project_id)
+        print("------------")
+        
+        if (str(SVM_PP_MODEL.MODEL_TYPE[0]) == '1') or (str(SVM_PP_MODEL.MODEL_TYPE[0]) == '2'):
+            
+            #pool.apply_async(SVM.one_to_all, args=(project_id,))  
+            SVM.one_to_all(project_id)                                
+           
+        elif str(SVM_PP_MODEL.MODEL_TYPE[0]) == '3':
+
+            #pool.apply_async(SVM.many_to_many, args=(project_id,))
+            SVM.many_to_many(project_id)
+
+        #pool.close()
+        #pool.join()
+    else:
+        SVM_PROJECT_CONFIRMOK_O2M = select_project_model_confirmok_o2m()
+        
+        #SVM_PROJECT_NG = select_project_by_status("CREATING_PAUSE")
+        
+        if len(SVM_PROJECT_CONFIRMOK_O2M) != 0:
+        
+            #pool=mp.Pool(16)
+            
+            #for a in range(len(SVM_PROJECT_NG)): 
+            SVM_MODEL = select_project_model_by_modelid(SVM_PROJECT_CONFIRMOK_O2M.MODEL_ID[0])
+                          
+            project_id = SVM_MODEL.PROJECT_ID[0]
+            
+            print("------------")
+            print(project_id)
+            print("------------")
+            
+            try:
+                SVM = SuperVM(str(SVM_PROJECT_CONFIRMOK_O2M.PROJECT_NAME[0]), str(SVM_PROJECT_CONFIRMOK_O2M.UPLOAD_FILE[0]), r"Config.json")                
+            except Exception as e:
+                print("SVM error 2")
+                update_project_STATUS_by_projectid("CREATING_ERROR", project_id)
+                        
+            update_project_STATUS_by_projectid("CREATING_RUN", project_id)
+            
+            #if (str(SVM_PROJECT_CONFIRMOK_O2M.MODEL_TYPE[0]) == '1') or (str(SVM_PROJECT_CONFIRMOK_O2M.MODEL_TYPE[0]) == '2'):
+                
+                #pool.apply_async(SVM.one_to_all_pause, args=(project_id,))
+            SVM.one_to_all_pause(project_id)                                  
+               
+            #elif str(SVM_PROJECT_CONFIRMOK_O2M.MODEL_TYPE[0]) == '3':
+
+                #pool.apply_async(SVM.many_to_many_pause, args=(project_id,))
+                #SVM.many_to_many_pause(project_id)
+
+            #pool.close()
+            #pool.join()  
+        else:
+            SVM_PROJECT_CONFIRMOK_M2M = select_project_model_confirmok_m2m()
+            
+            if len(SVM_PROJECT_CONFIRMOK_M2M) != 0:
+                
+                SVM_MODEL = select_project_model_by_modelid(SVM_PROJECT_CONFIRMOK_M2M.MODEL_ID[0])
+                          
+                project_id = SVM_MODEL.PROJECT_ID[0]
+                
+                print("------------")
+                print(project_id)
+                print("------------")
+                
+                try:
+                    SVM = SuperVM(str(SVM_PROJECT_CONFIRMOK_M2M.PROJECT_NAME[0]), str(SVM_PROJECT_CONFIRMOK_M2M.UPLOAD_FILE[0]), r"Config.json")             
+                except Exception as e:
+                    print("SVM error 3")
+                    update_project_STATUS_by_projectid("CREATING_ERROR", project_id)
+                            
+                update_project_STATUS_by_projectid("CREATING_RUN", project_id)
+                
+                SVM.many_to_many_pause(project_id)
+            
+#----------------------------------------------------------------------------------------------------------------------------------------
+#SmartVM_Constructor_online_x.py
+from Data_PreProcess import Data_PreProcess_Train, Data_PreProcess_Test, OnLine_Data_PreProcess_no_y
+from XDI import XDI_off_line_report, Build_XDI_Model, OnLine_XDI
+from YDI import YDI_off_line_report, Build_YDI_Model
+from MXCI_MYCI_pre import pre_MXCI_MYCI
+from MXCI_MYCI import MXCI_MYCI_offline, CI_online
+from XGB_model import xgb_online_predict
+from PLS_model import pls_online_predict_x
+from Read_path import read_path
+from config import read_config
+from CreateLog import WriteLog
+from DB_operation import select_project_model_by_projectid, select_project_model_by_projectid_status, select_project_online_scantime_x, select_project_online_scantime_by_projectid_datatype, select_online_parameter_by_projectid_datatype, select_online_status_by_projectid_runindex, select_projectx_run_by_itime, select_projectx_parameter_data_by_runindex_parameter, select_projectx_predict_data_by_runindex_parameter_modelid, select_projectx_contribution_data_by_runindex_parameter_model, update_online_scantime_lastscantime_by_projectid_datatype, update_online_status_xdialarm_by_projectid_runindex, update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid, update_projectx_run_signal_by_runindex, update_projectx_run_xdialarm_by_runindex, update_projectx_contribution_data_contribution_by_runindex_parameter_model, insert_online_status_projectid_runindex_xdialarm_itime, insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict, insert_projectx_contribution_data_runindex_model_parameter_contribution
+
+import os
+import json
+import traceback
+# from Data_Check import Data_Check
+from shutil import copyfile
+import pandas as pd
+import datetime
+import time
+
+
+class SuperVM():
+    def __init__(self, sorce_dir, train_data_name, config_file_name, batch_data_name_list=None):
+        self.base_path = os.path.join("../Cases/", sorce_dir)
+        self.base_name = os.path.basename(os.path.abspath(self.base_path))
+        self.train_data_name = train_data_name
+        self.train_base, self.ext = os.path.splitext(self.train_data_name)
+        self.train_data = os.path.join(self.base_path, train_data_name)
+        self.config_file = os.path.join(self.base_path, config_file_name)
+        if batch_data_name_list:
+            self.batch_data = [os.path.join(self.base_path, x) for x in batch_data_name_list]
+        self.in_path = os.path.join(self.base_path, "path_config.json")
+        self.mdoel_dict = {}
+        self.mdoel_dict["3"] = {}
+        self.mdoel_dict["3"]["Train"] = Data_PreProcess_Train
+        self.mdoel_dict["3"]["Test"] = Data_PreProcess_Test
+        self.mdoel_dict["4"] = {}
+        self.mdoel_dict["4"]["Train"] = Build_XDI_Model
+        self.mdoel_dict["4"]["Test"] = XDI_off_line_report
+        self.mdoel_dict["5"] = {}
+        self.mdoel_dict["5"]["Train"] = Build_YDI_Model
+        self.mdoel_dict["5"]["Test"] = YDI_off_line_report
+        self.mdoel_dict["8"] = {}
+        self.mdoel_dict["8"]["Train"] = pre_MXCI_MYCI
+        self.mdoel_dict["8"]["Test"] = MXCI_MYCI_offline
+
+        self.retrain_data = os.path.join(self.base_path, "retrain_data.csv")
+        if not os.path.exists(self.retrain_data):
+            copyfile(self.train_data, self.retrain_data)
+
+        # Other Variables initialized in methods
+        self.filter_feature = None
+        self.feature_lists = None
+        self.current_retrain_number = None
+        self.current_batch_number = None
+        self.path_config = None
+        self.filter_feature_dict = None
+        # self.filter_dir_path = None
+        self.filter_dir_name = None
+
+########################################################################################################################
+    def get_saved_path_config(self):
+        try:
+            with open(self.in_path) as json_data:
+                self.path_config = json.load(json_data)
+        except Exception as e:
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading path_config.json")
+                file.write(traceback.format_exc(e))
+            raise FileNotFoundError
+        return None
+
+########################################################################################################################
+    def get_max_retrain_num(self, retrain_num=None):
+        if retrain_num is None:
+            try:
+                first_key = list(self.path_config.keys())[0]
+                key_list = list(self.path_config[first_key].keys())
+                key_list.remove("main")
+                return max([int(x) for x in key_list])
+            except:
+                try:
+                    self.get_saved_path_config()
+                    first_key = list(self.path_config.keys())[0]
+                    key_list = list(self.path_config[first_key].keys())
+                    key_list.remove("main")
+                    return max([int(x) for x in key_list])
+                except Exception as e:
+                    raise FileNotFoundError("path_config not found")
+        else:
+            return retrain_num
+
+    def get_max_batch_num(self, retrain_num, batch_num=None):
+        if batch_num is None:
+            first_key = list(self.path_config.keys())[0]
+            key_list = list(self.path_config[first_key][str(retrain_num)].keys())
+            key_list.remove("main")
+            return max([int(x) for x in key_list])
+        else:
+            return batch_num
+    
+    def model_predict_online_x(self, df_online_X, path_dict):
+        xgb_y_pred = xgb_online_predict(path_dict['6']["XGB"]["5"], df_online_X) #20190702 eat 05_Prediction  
+        #20190702 mark temporarily
+        pls_online_predict_x(path_dict['6']["PLS"]["5"], df_online_X)
+        
+        input_path = read_path(path_dict['6']["PLS"]["5"])
+        mylog = WriteLog(input_path["log_path"], input_path["error_path"])    
+        config = read_config(input_path["config_path"], mylog)
+        config_y = config["Y"][0]
+        Baseline_Model = config["Model_Selection"][config_y]["Baseline_Model"] 
+        pls_y_name = config["Y"][0]+"_pred_PLS"
+        
+        #20190702 mark temporarily
+        pls_predict_test_path = os.path.join(path_dict['6']["PLS"]["5"], "trainPredResult.csv")
+        pls_test=pd.read_csv(pls_predict_test_path)
+        pls_test.rename({'Y_pred': pls_y_name}, axis=1, inplace=True) #20190722 after pls predict, must rename
+        #pls_y_pred = pls_test['Y_pred']
+        pls_y_pred = pls_test[pls_y_name]
+        #pls_y_pred = xgb_y_pred * 1.2
+        #20190709 for pls_y_pred null
+        if len(pls_y_pred) == 0:
+            pls_y_predc = 0
+        else:
+            pls_y_predc = pls_y_pred[0] #20190621 because return series, must assign location
+
+        if Baseline_Model == "PLS":
+            #20190702 mark temporarily
+            return xgb_y_pred, pls_y_predc 
+            #return xgb_y_pred, pls_y_pred
+        else:
+            #20190702 mark temporarily
+            return pls_y_predc, xgb_y_pred
+            #return pls_y_pred, xgb_y_pred
+    
+    def online_x_phase(self, projectid, datatype, base_name, retrain_num, batch_num=None):
+        retrain_num = self.get_max_retrain_num(retrain_num)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+
+        path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+        SVM_PROJECT_ONLINE_SCANTIME = select_project_online_scantime_by_projectid_datatype(projectid, datatype)
+        
+        #20190620 get server name
+        server_name_1 = str(SVM_PROJECT_ONLINE_SCANTIME.SERVER_NAME[0])
+        #cnxn2 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name_1 + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+        
+        project_id = "SVM_PROJECT" + str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0])
+        
+        if len(SVM_PROJECT_ONLINE_SCANTIME) == 0:
+            print('online_x_phase no scantime')                                                                      
+        else:
+            MAX_TIME = "9998-12-31 23:59:59.999"
+                       
+            LAST_SCANTIME = datetime.datetime.strftime(SVM_PROJECT_ONLINE_SCANTIME.LAST_SCANTIME[0], '%Y-%m-%d %H:%M:%S.%f')[:-3] #20190704 get millisecond 3
+            SVM_PROJECT_RUN = select_projectx_run_by_itime(project_id, LAST_SCANTIME, MAX_TIME, server_name_1)
+            
+            if len(SVM_PROJECT_RUN) == 0:
+                print('SVM_PROJECT_RUN null')              
+            else:
+                update_online_scantime_lastscantime_by_projectid_datatype(SVM_PROJECT_RUN.ITIME[0], SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], 'X', server_name_1)                   
+                SVM_ONLINE_PARAMETER = select_online_parameter_by_projectid_datatype(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], 'X', server_name_1)
+                
+                for k in range(len(SVM_ONLINE_PARAMETER)):
+                                          
+                    if str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'TOOLID':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.TOOLID[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'LOTNAME':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.LOTNAME[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FOUPNAME':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FOUPNAME[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'OPID':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.OPID[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'RECIPE':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.RECIPE[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'ABBRID':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.ABBRID[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'PRODUCT':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.PRODUCT[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'MODELNO':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.MODELNO[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'CHAMBER':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.CHAMBER[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SHEETID':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SHEETID[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SLOTNO':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SLOTNO[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'POINT':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.POINT[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FILTER_FEATURE':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FILTER_FEATURE[0])],axis=1)
+                    else:
+                        SVM_PARAMETER_DATA_tmp = select_projectx_parameter_data_by_runindex_parameter(project_id, SVM_PROJECT_RUN.RUNINDEX[0], SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k], server_name_1)
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PARAMETER_DATA_tmp.PARAM_VALUE[0])],axis=1)
+                    
+                    if k == 0:
+                        SVM_PARAMETER_DATA = SVM_PARAMETER_DATA_part
+                    else:
+                        SVM_PARAMETER_DATA = pd.concat([SVM_PARAMETER_DATA, SVM_PARAMETER_DATA_part], axis=0, ignore_index=True)
+                    
+                    SVM_PARAMETER_DATA_part = SVM_PARAMETER_DATA_part.iloc[0:0]
+                    
+                                                                                                                                                                                        
+                if len(SVM_PARAMETER_DATA) == 0:
+                    print('SVM_PARAMETER_DATA null')  #20190619 add inert sql in the future
+                else:
+                    #df_SVM_PARAMETER_DATA_lite=SVM_PARAMETER_DATA.drop(['RUNINDEX','ITIME'], axis=1)
+                    df_SVM_PARAMETER_DATA_lite_T = SVM_PARAMETER_DATA.T #20190619 行列互轉
+                    headers = df_SVM_PARAMETER_DATA_lite_T.iloc[0] #20190619 first row set header
+                    df_SVM_PARAMETER_DATA_lite_T_H  = pd.DataFrame(df_SVM_PARAMETER_DATA_lite_T.values[1:], columns=headers)
+                    
+                    print("online x phase[ns]")
+                    df_online_X = OnLine_Data_PreProcess_no_y(df_SVM_PARAMETER_DATA_lite_T_H, path_dict['3']["3"]) #20190702 eat 03_test
+                    XDI_online_value, XDI_Threshold, XDI_Check, df_contri = OnLine_XDI(df_online_X, path_dict['4']["3"])
+                    y_pred, y_base = self.model_predict_online_x(df_online_X, path_dict)
+                    MXCI_value, MXCI_T, MYCI_value, MYCI_T, light = CI_online(path_dict['8']["3"], df_online_X, y_pred, y_base)
+                                           
+                    SVM_PROJECT_MODEL = select_project_model_by_projectid_status(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], "ONLINE", server_name_1)
+                    
+                    if XDI_online_value is not None:
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'XDI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'XDI', XDI_online_value, SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                
+                        else:  
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, XDI_online_value, 0, SVM_PROJECT_RUN.RUNINDEX[0], 'XDI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                              
+                    if XDI_Threshold is not None:
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'XDI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'XDI_Threshold', XDI_Threshold, SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)  
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, XDI_Threshold, 0, SVM_PROJECT_RUN.RUNINDEX[0], 'XDI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)                                             
+                    
+                    if XDI_Check is not None:
+                        if int(XDI_Check) == 0:
+                            SVM_ONLINE_STATUS = select_online_status_by_projectid_runindex(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], SVM_PROJECT_RUN.RUNINDEX[0], server_name_1)
+                            if len(SVM_ONLINE_STATUS) == 0:
+                                insert_online_status_projectid_runindex_xdialarm_itime(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], SVM_PROJECT_RUN.RUNINDEX[0], 1, datetime.datetime.now(), server_name_1) #20190710 xdi_alarm 0->1                                
+                            else: 
+                                update_online_status_xdialarm_by_projectid_runindex(1, SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], SVM_PROJECT_RUN.RUNINDEX[0], server_name_1)  
+                            update_projectx_run_xdialarm_by_runindex(project_id, 1, SVM_PROJECT_RUN.RUNINDEX[0], server_name_1)                                                   
+                    
+                    if y_pred is not None:
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'Predict_Y', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0: 
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'Predict_Y', y_pred, SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                  
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, y_pred, 0, SVM_PROJECT_RUN.RUNINDEX[0], 'Predict_Y', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                    
+                    if MXCI_value is not None:
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'MXCI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:   
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'MXCI', MXCI_value, SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)  
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, MXCI_value, 0, SVM_PROJECT_RUN.RUNINDEX[0], 'MXCI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        
+                    if MXCI_T is not None:
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'MXCI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'MXCI_Threshold', MXCI_T, SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                    
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, MXCI_T, 0, SVM_PROJECT_RUN.RUNINDEX[0], 'MXCI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        
+                    if MYCI_value is not None:
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'MYCI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        MYCI_value = float(str(MYCI_value)[0:10])
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'MYCI', MYCI_value, SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                   
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, MYCI_value, 0, SVM_PROJECT_RUN.RUNINDEX[0], 'MYCI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        
+                    if MYCI_T is not None:
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'MYCI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'MYCI_Threshold', MYCI_T, SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                    
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, MYCI_T, 0, SVM_PROJECT_RUN.RUNINDEX[0], 'MYCI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                    
+                    if light is not None:
+                        update_projectx_run_signal_by_runindex(project_id, light, SVM_PROJECT_RUN.RUNINDEX[0], server_name_1)
+                    
+                    if df_contri is not None:
+                        for j in range(df_contri.shape[0]):
+                            SVM_PROJECT_CONTRIBUTION_DATA = select_projectx_contribution_data_by_runindex_parameter_model(project_id, SVM_PROJECT_RUN.RUNINDEX[0], df_contri.Col_Name[j], 'XDI', server_name_1)
+                            if len(SVM_PROJECT_CONTRIBUTION_DATA) == 0:  
+                                insert_projectx_contribution_data_runindex_model_parameter_contribution(project_id, SVM_PROJECT_RUN.RUNINDEX[0], 'XDI', df_contri.Col_Name[j], df_contri.Contribution[j], server_name_1)
+                            else: 
+                                update_projectx_contribution_data_contribution_by_runindex_parameter_model(project_id, df_contri.Contribution[j], SVM_PROJECT_RUN.RUNINDEX[0], df_contri.Col_Name[j], 'XDI', server_name_1)                                                                                       
+        return None
+    
+    def one_to_all_online_x(self, projectid, datatype, retrain_num):           
+        retrain_num = self.get_max_retrain_num(retrain_num=retrain_num)
+        self.get_saved_path_config()
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+        self.online_x_phase(projectid, datatype, base_name=self.base_name, retrain_num=retrain_num, batch_num=batch_num)
+        
+        return None
+ 
+if __name__ == '__main__':        
+    #20190627 online data must go 10.96.18.199, get SERVER_NAME to the server
+    def timer(n):
+        while True: 
+            SVM_PROJECT_ONLINE_SCANTIME = select_project_online_scantime_x()
+                                       
+            if len(SVM_PROJECT_ONLINE_SCANTIME) != 0:
+                
+                for a in range(len(SVM_PROJECT_ONLINE_SCANTIME)):
+                    
+                    projectid = SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[a]
+                    SVM_MODEL_ONLINE_X = select_project_model_by_projectid_status(projectid, "ONLINE")
+                    
+                    if len(SVM_MODEL_ONLINE_X) != 0:
+                        
+                        SVM = SuperVM(str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_NAME[a]), str(SVM_PROJECT_ONLINE_SCANTIME.UPLOAD_FILE[a]), r"Config.json")                
+                        datatype = SVM_PROJECT_ONLINE_SCANTIME.DATATYPE[a].upper()    
+                        retrain_num = int(SVM_MODEL_ONLINE_X.MODEL_SEQ[0]) 
+                        
+                        print("--------------")
+                        print(projectid)
+                        print(datatype)
+                        print(retrain_num)
+                        print("--------------")
+                        
+                        SVM.one_to_all_online_x(projectid, datatype, retrain_num)
+                    
+                    else:
+                        print("SVM_MODEL_ONLINE_X None")
+                              
+            time.sleep(n)
+    timer(5) 
+
+#----------------------------------------------------------------------------------------------------------------------------------------
+#
