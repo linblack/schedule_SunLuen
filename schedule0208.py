@@ -7259,4 +7259,5002 @@ if __name__ == '__main__':
     timer(5) 
 
 #----------------------------------------------------------------------------------------------------------------------------------------
+#SmartVM_Constructor_online_x_many.py
+from Data_Preview import Data_Preview
+from Data_PreProcess import Data_PreProcess_Train, Data_PreProcess_Test, OnLine_Data_PreProcess, OnLine_Data_PreProcess_no_y
+from XDI import XDI_off_line_report, Build_XDI_Model, OnLine_XDI
+from YDI import YDI_off_line_report, Build_YDI_Model, OnLine_YDI
+from MXCI_MYCI_pre import pre_MXCI_MYCI
+from MXCI_MYCI import MXCI_MYCI_offline, CI_online
+from XGB_model import xgb_tuning, xgb_build, xgb_predict, xgb_merge_tuning, xgb_merge_predict, xgb_batch_predict, xgb_online_predict
+from PLS_model import pls_build, pls_predict, pls_merge_predict, pls_batch_predict, pls_online_predict_x_many
+from Read_path import read_path
+from config import read_config, save_config
+from CreateLog import WriteLog
+from DB_operation import DB_Connection, select_project_config_by_modelid_parameter3RD, select_project_model_by_projectid, select_project_model_by_projectid_status, select_project_model_by_projectid_status_filterfeature, select_project_model_by_projectid_predictresult, select_project_online_scantime_x_many, select_project_online_scantime_by_projectid_datatype, select_online_parameter_by_projectid, select_online_parameter_by_projectid_datatype, select_online_status_by_projectid_runindex, select_projectx_run_by_itime, select_projectx_parameter_data_by_runindex_parameter, select_projectx_predict_data_by_runindex_parameter_modelid, select_projectx_contribution_data_by_runindex_parameter_model, update_project_model_predictresult_by_modelid, update_online_scantime_lastscantime_by_projectid_datatype, update_online_status_xdialarm_by_projectid_runindex, update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid, update_projectx_run_xdialarm_by_runindex, update_projectx_run_ydialarm_by_runindex, update_projectx_contribution_data_contribution_by_runindex_parameter_model, insert_online_status_projectid_runindex_xdialarm_itime, insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict, insert_projectx_contribution_data_runindex_model_parameter_contribution
+
+import os
+import json
+import traceback
+from Path import All_path
+from Data_Collector import Data_Collector
+# from Data_Check import Data_Check
+from Exclusion import DataRemove, FeatureExclude
+
+from shutil import copyfile
+import numpy as np
+import pandas as pd
+import pyodbc
+import datetime
+import time
+
+
+class SuperVM():
+    def __init__(self, sorce_dir, train_data_name, config_file_name, batch_data_name_list=None):
+        self.base_path = os.path.join("../Cases/", sorce_dir)
+        self.base_name = os.path.basename(os.path.abspath(self.base_path))
+        self.train_data_name = train_data_name
+        self.train_base, self.ext = os.path.splitext(self.train_data_name)
+        self.train_data = os.path.join(self.base_path, train_data_name)
+        self.config_file = os.path.join(self.base_path, config_file_name)
+        if batch_data_name_list:
+            self.batch_data = [os.path.join(self.base_path, x) for x in batch_data_name_list]
+        self.in_path = os.path.join(self.base_path, "path_config.json")
+        self.mdoel_dict = {}
+        self.mdoel_dict["3"] = {}
+        self.mdoel_dict["3"]["Train"] = Data_PreProcess_Train
+        self.mdoel_dict["3"]["Test"] = Data_PreProcess_Test
+        self.mdoel_dict["4"] = {}
+        self.mdoel_dict["4"]["Train"] = Build_XDI_Model
+        self.mdoel_dict["4"]["Test"] = XDI_off_line_report
+        self.mdoel_dict["5"] = {}
+        self.mdoel_dict["5"]["Train"] = Build_YDI_Model
+        self.mdoel_dict["5"]["Test"] = YDI_off_line_report
+        self.mdoel_dict["8"] = {}
+        self.mdoel_dict["8"]["Train"] = pre_MXCI_MYCI
+        self.mdoel_dict["8"]["Test"] = MXCI_MYCI_offline
+
+        self.retrain_data = os.path.join(self.base_path, "retrain_data.csv")
+        if not os.path.exists(self.retrain_data):
+            copyfile(self.train_data, self.retrain_data)
+
+        # Other Variables initialized in methods
+        self.filter_feature = None
+        self.feature_lists = None
+        self.current_retrain_number = None
+        self.current_batch_number = None
+        self.path_config = None
+        self.filter_feature_dict = None
+        # self.filter_dir_path = None
+        self.filter_dir_name = None
+
+    def get_filter_feature(self):
+        try:
+            with open(self.config_file) as json_data:
+                config = json.load(json_data)
+        except Exception as e:
+            config = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading config file\n")
+                file.write(traceback.format_exc(e))
+                raise FileNotFoundError
+        self.filter_feature = config["Filter_Feature"]
+        self.model_pred_name = config["Model_Pred_Name"]
+        return None
+
+    def get_feature_content(self, split_flag=None):
+        try:
+            training_data = pd.read_csv(self.train_data)
+        except Exception as e:
+            training_data = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading raw data\n")
+                file.write(str(e) + "\n")
+                file.write(traceback.format_exc())
+                raise FileNotFoundError
+        self.feature_lists = training_data[self.filter_feature].unique().tolist()
+        self.feature_lists.sort()
+        if split_flag is not None:
+            self.filter_feature_dict = {}
+            for feature_list in self.feature_lists:
+                tmp_data = training_data[training_data[self.filter_feature] == feature_list].copy().reset_index(drop=True)
+                self.filter_feature_dict[feature_list] = \
+                    os.path.join(self.base_path, self.train_base + "_" + self.filter_feature + "_" + str(feature_list) + self.ext)
+                tmp_data.to_csv(self.filter_feature_dict[feature_list], index=False)
+        return None
+
+########################################################################################################################
+    def get_saved_path_config(self):
+        try:
+            with open(self.in_path) as json_data:
+                self.path_config = json.load(json_data)
+        except Exception as e:
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading path_config.json")
+                file.write(traceback.format_exc(e))
+            raise FileNotFoundError
+        return None
+
+########################################################################################################################
+    def get_max_retrain_num(self, retrain_num=None):
+        if retrain_num is None:
+            try:
+                first_key = list(self.path_config.keys())[0]
+                key_list = list(self.path_config[first_key].keys())
+                key_list.remove("main")
+                return max([int(x) for x in key_list])
+            except:
+                try:
+                    self.get_saved_path_config()
+                    first_key = list(self.path_config.keys())[0]
+                    key_list = list(self.path_config[first_key].keys())
+                    key_list.remove("main")
+                    return max([int(x) for x in key_list])
+                except Exception as e:
+                    raise FileNotFoundError("path_config not found")
+        else:
+            return retrain_num
+
+    def get_max_batch_num(self, retrain_num, batch_num=None):
+        if batch_num is None:
+            first_key = list(self.path_config.keys())[0]
+            key_list = list(self.path_config[first_key][str(retrain_num)].keys())
+            key_list.remove("main")
+            return max([int(x) for x in key_list])
+        else:
+            return batch_num
+    
+    def model_predict_online_x(self, df_online_X, path_dict):
+        xgb_y_pred = xgb_online_predict(path_dict['6']["XGB"]["5"], df_online_X) #20190702 eat 05_Prediction  
+        #20190702 mark temporarily
+        pls_online_predict_x_many(path_dict['6']["PLS"]["5"], df_online_X)
+        
+        input_path = read_path(path_dict['6']["PLS"]["5"])
+        mylog = WriteLog(input_path["log_path"], input_path["error_path"])    
+        config = read_config(input_path["config_path"], mylog)
+        config_y = config["Y"][0]
+        Baseline_Model = config["Model_Selection"][config_y]["Baseline_Model"]  
+        pls_y_name = config["Y"][0]+"_pred_PLS"
+        
+        #20190702 mark temporarily
+        pls_predict_test_path = os.path.join(path_dict['6']["PLS"]["5"], "trainPredResult.csv")
+        pls_test=pd.read_csv(pls_predict_test_path)
+        pls_test.rename({'Y_pred': pls_y_name}, axis=1, inplace=True) #20190722 after pls predict, must rename
+        #pls_y_pred = pls_test['Y_pred']
+        pls_y_pred = pls_test[pls_y_name]
+        #pls_y_pred = xgb_y_pred * 1.2
+
+        if Baseline_Model == "PLS":
+            #20190702 mark temporarily
+            return xgb_y_pred, pls_y_pred[0] #20190621 because return series, must assign location
+            #return xgb_y_pred, pls_y_pred
+        else:
+            #20190702 mark temporarily
+            return pls_y_pred[0], xgb_y_pred
+            #return pls_y_pred, xgb_y_pred
+    
+    def online_x_many_phase(self, projectid, model_id, datatype, base_name, retrain_num, batch_num=None):
+        retrain_num = self.get_max_retrain_num(retrain_num)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+
+        path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+        
+        #server_name = "10.96.18.199"
+        db_name = "APC"
+        user = "YL"
+        password = "YL$212"                  
+        #cnxn1 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+                
+        #sql = "select * from SVM_PROJECT where PROJECT_NAME = \'" + self.base_name + "\'"
+        #SVM_PROJECT = pd.read_sql(sql, cnxn1)
+        
+        SVM_PROJECT_ONLINE_SCANTIME = select_project_online_scantime_by_projectid_datatype(projectid, datatype)
+        #20190620 get server name
+        server_name_1 = str(SVM_PROJECT_ONLINE_SCANTIME.SERVER_NAME[0])
+        cnxn2 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name_1 + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+                
+        project_id = "SVM_PROJECT" + str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0])
+        #project_id = "SVM_PROJECT" + str(1) #20190618 Temporary use
+        
+        #sql = "select * from SVM_ONLINE_SCANTIME where PROJECT_ID = \'" + str(SVM_PROJECT.PROJECT_ID[0]) + "\' and DATATYPE = \'X\'"  
+        #SVM_ONLINE_SCANTIME = pd.read_sql(sql, cnxn2)
+        if len(SVM_PROJECT_ONLINE_SCANTIME) == 0:
+            print('online_x_many_phase no scantime')                                                                                                                 
+        else:
+            SVM_PROJECT_CONFIG = select_project_config_by_modelid_parameter3RD(model_id, "Filter_Feature", server_name_1)
+            MAX_TIME = "9998-12-31 23:59:59.999"                        
+            LAST_SCANTIME = datetime.datetime.strftime(SVM_PROJECT_ONLINE_SCANTIME.LAST_SCANTIME[0], '%Y-%m-%d %H:%M:%S.%f')[:-3] #20190704 get millisecond 3
+            
+            FILTER_FEATURE = SVM_PROJECT_CONFIG.PARAM_VALUE[0]
+            SVM_PROJECT_RUN = select_projectx_run_by_itime(project_id, LAST_SCANTIME, MAX_TIME, server_name_1)
+        
+            if len(SVM_PROJECT_RUN) != 0:   
+                
+                index = base_name.rfind("_")
+                current_p = base_name[index+1:]
+                
+                try:
+                    db_p = SVM_PROJECT_RUN[FILTER_FEATURE][0]
+                except:
+                    db_p = SVM_PROJECT_RUN['FILTER_FEATURE'][0]
+                """
+                print("---------------")
+                print(current_p)
+                print(db_p)
+                print("---------------")
+                """          
+                if current_p == str(db_p):
+                                               
+                    cursor1 = cnxn2.cursor()
+                    cursor1.execute("UPDATE SVM_ONLINE_SCANTIME SET LAST_SCANTIME = ? WHERE PROJECT_ID = ? AND DATATYPE = ?", SVM_PROJECT_RUN.ITIME[0], int(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]), 'X')
+                    cnxn2.commit()
+                    
+                    #sql = r"select * from SVM_ONLINE_PARAMETER where PROJECT_ID = '" + str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]) + r"' order by SEQ"
+                    #SVM_ONLINE_PARAMETER = pd.read_sql(sql, cnxn1)
+                    SVM_ONLINE_PARAMETER = select_online_parameter_by_projectid_datatype(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], 'X', server_name_1)
+            
+                    for k in range(len(SVM_ONLINE_PARAMETER)):
+                                              
+                        if str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'TOOLID':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.TOOLID[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'LOTNAME':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.LOTNAME[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FOUPNAME':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FOUPNAME[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'OPID':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.OPID[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'RECIPE':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.RECIPE[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'ABBRID':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.ABBRID[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'PRODUCT':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.PRODUCT[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'MODELNO':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.MODELNO[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'CHAMBER':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.CHAMBER[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SHEETID':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SHEETID[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SLOTNO':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SLOTNO[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'POINT':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.POINT[0])],axis=1)
+                        elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FILTER_FEATURE':                           
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FILTER_FEATURE[0])],axis=1)
+                        else:
+                            #sql = "select * from " + str(project_id) + "_PARAMETER_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[i]) + r" and UPPER(PARAMETER) = '" + str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() + r"'"
+                            #SVM_PARAMETER_DATA_tmp = pd.read_sql(sql, cnxn2)
+                            SVM_PARAMETER_DATA_tmp = select_projectx_parameter_data_by_runindex_parameter(project_id, SVM_PROJECT_RUN.RUNINDEX[0], SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k], server_name_1)
+                            SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PARAMETER_DATA_tmp.PARAM_VALUE[0])],axis=1)
+                        
+                        if k == 0:
+                            SVM_PARAMETER_DATA = SVM_PARAMETER_DATA_part
+                        else:
+                            SVM_PARAMETER_DATA = pd.concat([SVM_PARAMETER_DATA, SVM_PARAMETER_DATA_part], axis=0, ignore_index=True)
+                        
+                        SVM_PARAMETER_DATA_part = SVM_PARAMETER_DATA_part.iloc[0:0]
+                
+                    #sql = "select * from " + str(project_id) + "_PARAMETER_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0])
+                    #SVM_PARAMETER_DATA = pd.read_sql(sql, cnxn2)
+                        
+                    if len(SVM_PARAMETER_DATA) == 0:
+                        print('SVM_PARAMETER_DATA null')  #20190619 add inert sql in the future
+                    else:
+                        #df_SVM_PARAMETER_DATA_lite=SVM_PARAMETER_DATA.drop(['RUNINDEX','ITIME'], axis=1)
+                        df_SVM_PARAMETER_DATA_lite_T = SVM_PARAMETER_DATA.T #20190619 行列互轉
+                        headers = df_SVM_PARAMETER_DATA_lite_T.iloc[0] #20190619 first row set header
+                        df_SVM_PARAMETER_DATA_lite_T_H  = pd.DataFrame(df_SVM_PARAMETER_DATA_lite_T.values[1:], columns=headers)
+                            
+                        print("online x phase[ns]")
+                        df_online_X = OnLine_Data_PreProcess_no_y(df_SVM_PARAMETER_DATA_lite_T_H, path_dict['3']["3"])
+                        XDI_online_value, XDI_Threshold, XDI_Check, df_contri = OnLine_XDI(df_online_X, path_dict['4']["3"])
+                        y_pred, y_base = self.model_predict_online_x(df_online_X, path_dict)
+                        MXCI_value, MXCI_T, MYCI_value, MYCI_T, light = CI_online(path_dict['8']["3"], df_online_X, y_pred, y_base)
+                        
+                        try:
+                            SVM_PROJECT_MODEL = select_project_model_by_projectid_status_filterfeature(projectid, "ONLINE", SVM_PROJECT_RUN[FILTER_FEATURE][0], server_name_1)
+                        except:
+                            SVM_PROJECT_MODEL = select_project_model_by_projectid_status_filterfeature(projectid, "ONLINE", SVM_PROJECT_RUN['FILTER_FEATURE'][0], server_name_1)
+                        """                          
+                        if SVM_PROJECT_RUN.FILTER_FEATURE[0] is not None:
+                            if SVM_PROJECT_RUN.FILTER_FEATURE[0] == 'Point_ID':
+                                sql = "select * from SVM_PROJECT_MODEL where MODEL_NAME = \'" + self.base_name + "_POINT_" + SVM_PROJECT_RUN.POINT[0] + r"' AND UPPER(STATUS) = 'ONLINE'"
+                            elif SVM_PROJECT_RUN.FILTER_FEATURE[0] == 'Sheet_ID':
+                                sql = "select * from SVM_PROJECT_MODEL where MODEL_NAME = \'" + self.base_name + "_SHEET_" + SVM_PROJECT_RUN.SHEETID[0] + r"' AND UPPER(STATUS) = 'ONLINE'"                                
+                            SVM_PROJECT_MODEL = pd.read_sql(sql, cnxn2)
+                        """
+                        if XDI_online_value is not None:
+                            sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0]) + r" and PARAMETER = 'XDI' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                            SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                            if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                cursor1 = cnxn2.cursor()
+                                sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(project_id+"_PREDICT_DATA", int(SVM_PROJECT_RUN.RUNINDEX[0]), 'XDI', XDI_online_value, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0)
+                                cursor1.execute(sql)       
+                                cnxn2.commit()                                 
+                            else: 
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", XDI_online_value, 0, int(SVM_PROJECT_RUN.RUNINDEX[0]), 'XDI', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                cursor1.execute(sql)
+                                cnxn2.commit()  
+                                                  
+                        if XDI_Threshold is not None:
+                            sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0]) + r" and PARAMETER = 'XDI_Threshold' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                            SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                            if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                cursor1 = cnxn2.cursor()
+                                sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(project_id+"_PREDICT_DATA", int(SVM_PROJECT_RUN.RUNINDEX[0]), 'XDI_Threshold', XDI_Threshold, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0)
+                                cursor1.execute(sql)       
+                                cnxn2.commit()                                 
+                            else: 
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", XDI_Threshold, 0, int(SVM_PROJECT_RUN.RUNINDEX[0]), 'XDI_Threshold', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                cursor1.execute(sql)
+                                cnxn2.commit()                                             
+                        
+                        if XDI_Check is not None:
+                            if int(XDI_Check) == 0:
+                                sql = "select * from SVM_ONLINE_STATUS where PROJECT_ID = \'" + str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]) + "\' and RUNINDEX = \'" + str(SVM_PROJECT_RUN.RUNINDEX[0]) + "\'"
+                                SVM_ONLINE_STATUS = pd.read_sql(sql, cnxn2)
+                                if len(SVM_ONLINE_STATUS) == 0:
+                                    cursor1 = cnxn2.cursor()  
+                                    cursor1.execute("insert into SVM_ONLINE_STATUS(PROJECT_ID, RUNINDEX, XDI_ALARM, ITIME) values (?,?,?,?)", int(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]), int(SVM_PROJECT_RUN.RUNINDEX[0]), 1, datetime.datetime.now())
+                                    cnxn2.commit()                                    
+                                else:
+                                    cursor1 = cnxn2.cursor()
+                                    cursor1.execute("UPDATE SVM_ONLINE_STATUS SET XDI_ALARM = ? WHERE PROJECT_ID = ? AND RUNINDEX = ?", 1, int(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]), int(SVM_PROJECT_RUN.RUNINDEX[0]))
+                                    cnxn2.commit() 
+                                update_projectx_run_xdialarm_by_runindex(project_id, 1, SVM_PROJECT_RUN.RUNINDEX[0], server_name_1)                                                         
+                        
+                        if y_pred is not None:
+                            sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0]) + r" and PARAMETER = 'Predict_Y' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                            SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                            if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PROJECT_RUN.RUNINDEX[0]), 'Predict_Y', y_pred, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0, now)
+                                cursor1.execute(sql)       
+                                cnxn2.commit()                                   
+                            else: 
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", y_pred, 0, int(SVM_PROJECT_RUN.RUNINDEX[0]), 'Predict_Y', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                cursor1.execute(sql)
+                                cnxn2.commit()     
+                        
+                        if y_base is not None:
+                            sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0]) + r" and PARAMETER = 'y_base' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                            SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                            if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PROJECT_RUN.RUNINDEX[0]), 'y_base', y_base, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0, now)
+                                cursor1.execute(sql)       
+                                cnxn2.commit()                                   
+                            else: 
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", y_base, 0, int(SVM_PROJECT_RUN.RUNINDEX[0]), 'y_base', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                cursor1.execute(sql)
+                                cnxn2.commit() 
+                        
+                        if MXCI_value is not None:
+                            sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0]) + r" and PARAMETER = 'MXCI' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                            SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                            if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PROJECT_RUN.RUNINDEX[0]), 'MXCI', MXCI_value, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0, now)
+                                cursor1.execute(sql)       
+                                cnxn2.commit()                                   
+                            else: 
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", MXCI_value, 0, int(SVM_PROJECT_RUN.RUNINDEX[0]), 'MXCI', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                cursor1.execute(sql)
+                                cnxn2.commit()
+                            
+                        if MXCI_T is not None:
+                            sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0]) + r" and PARAMETER = 'MXCI_Threshold' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                            SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                            if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PROJECT_RUN.RUNINDEX[0]), 'MXCI_Threshold', MXCI_T, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0, now)
+                                cursor1.execute(sql)       
+                                cnxn2.commit()                                  
+                            else: 
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", MXCI_T, 0, int(SVM_PROJECT_RUN.RUNINDEX[0]), 'MXCI_Threshold', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                cursor1.execute(sql)
+                                cnxn2.commit()
+                            
+                        if MYCI_value is not None:
+                            sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0]) + r" and PARAMETER = 'MYCI' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                            SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                            MYCI_value = float(str(MYCI_value)[0:10])
+                            if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PROJECT_RUN.RUNINDEX[0]), 'MYCI', MYCI_value, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0, now)
+                                cursor1.execute(sql)       
+                                cnxn2.commit()                                  
+                            else: 
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", MYCI_value, 0, int(SVM_PROJECT_RUN.RUNINDEX[0]), 'MYCI', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                cursor1.execute(sql)
+                                cnxn2.commit()
+                            
+                        if MYCI_T is not None:
+                            sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0]) + r" and PARAMETER = 'MYCI_Threshold' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                            SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                            if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PROJECT_RUN.RUNINDEX[0]), 'MYCI_Threshold', MYCI_T, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0, now)
+                                cursor1.execute(sql)       
+                                cnxn2.commit()                                  
+                            else: 
+                                now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                cursor1 = cnxn2.cursor()
+                                sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", MYCI_T, 0, int(SVM_PROJECT_RUN.RUNINDEX[0]), 'MYCI_Threshold', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                cursor1.execute(sql)
+                                cnxn2.commit()
+                            
+                        if light is not None:
+                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                            cursor1 = cnxn2.cursor()
+                            sql = 'UPDATE {} SET SIGNAL = {} WHERE RUNINDEX = {}'.format(project_id+"_RUN", light, int(SVM_PROJECT_RUN.RUNINDEX[0]))
+                            cursor1.execute(sql)
+                            cnxn2.commit()
+                        
+                        if df_contri is not None:
+                            for j in range(df_contri.shape[0]):
+                                sql = "select * from " + str(project_id) + "_CONTRIBUTION_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[0]) + r" and PARAMETER = '" + str(df_contri.Col_Name[j]) + r"' and MODEL = 'XDI'"
+                                SVM_PROJECT_CONTRIBUTION_DATA = pd.read_sql(sql, cnxn2)
+                                if len(SVM_PROJECT_CONTRIBUTION_DATA) == 0:
+                                    now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'INSERT INTO {} (RUNINDEX,MODEL,PARAMETER,CONTRIBUTION,ITIME) VALUES ({},\'{}\',\'{}\',{},\'{}\')'.format(project_id+"_CONTRIBUTION_DATA", int(SVM_PROJECT_RUN.RUNINDEX[0]), 'XDI', str(df_contri.Col_Name[j]), float(df_contri.Contribution[j]), now)
+                                    cursor1.execute(sql)       
+                                    cnxn2.commit()                                  
+                                else: 
+                                    now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'UPDATE {} SET CONTRIBUTION = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL = \'{}\''.format(project_id+"_CONTRIBUTION_DATA", float(df_contri.Contribution[j]), int(SVM_PROJECT_RUN.RUNINDEX[0]), str(df_contri.Col_Name[j]), 'XDI')
+                                    cursor1.execute(sql)
+                                    cnxn2.commit()               
+                                
+        return None
+    
+    def many_online_x_phase(self, projectid, model_id, datatype, retrain_num, batch_num):
+        for feature in self.feature_lists:
+            self.online_x_many_phase(projectid, model_id, datatype, base_name=self.filter_dir_name[feature], retrain_num=retrain_num, batch_num=batch_num)
+        return None
+    
+    def many_to_many_online_x(self, projectid, model_id, datatype, retrain_num):
+        #self.batch_data = batch_data
+        retrain_num = self.get_max_retrain_num(retrain_num=retrain_num)
+
+        if self.filter_feature is None:
+            self.get_filter_feature()
+
+        if self.feature_lists is None:
+            self.get_feature_content()
+
+        if self.filter_dir_name is None:
+            self.filter_dir_name = {}
+            for feature in self.feature_lists:
+                self.filter_dir_name[feature] = self.base_name + "_" + self.filter_feature + "_" + str(feature)
+                
+        self.get_saved_path_config()
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+        self.many_online_x_phase(projectid, model_id, datatype, retrain_num=retrain_num, batch_num=batch_num)
+
+        return None
+
+if __name__ == '__main__':        
+    #20190627 online data must go 10.96.18.199, get SERVER_NAME to the server
+    def timer(n):
+        #i = 1
+        while True:
+            #print(i)                 
+            SVM_PROJECT_ONLINE_SCANTIME = select_project_online_scantime_x_many() #20190718 tell care 48 point error, modify sql
+            
+            if len(SVM_PROJECT_ONLINE_SCANTIME) != 0:
+                
+                for a in range(len(SVM_PROJECT_ONLINE_SCANTIME)):
+                                   
+                    projectid = SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[a]
+                    SVM_MODEL_ONLINE_X_MANY = select_project_model_by_projectid_status(projectid, "ONLINE")
+                    
+                    if len(SVM_MODEL_ONLINE_X_MANY) != 0:
+                    
+                        SVM = SuperVM(str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_NAME[a]), str(SVM_PROJECT_ONLINE_SCANTIME.UPLOAD_FILE[a]), r"Config.json")                
+                        datatype = SVM_PROJECT_ONLINE_SCANTIME.DATATYPE[a].upper()
+                        retrain_num = int(SVM_MODEL_ONLINE_X_MANY.MODEL_SEQ[0]) 
+                        model_id = SVM_MODEL_ONLINE_X_MANY.MODEL_ID[0]
+                        """
+                        print("--------------")
+                        print(projectid)
+                        print(model_id)
+                        print(datatype)
+                        print(retrain_num)
+                        print("--------------")
+                        """
+                        SVM.many_to_many_online_x(projectid, model_id, datatype, retrain_num)
+                    
+                    else:
+                        print("SVM_MODEL_ONLINE_X_MANY None")
+
+            #i = i+1                 
+            time.sleep(n)
+    timer(5) 
+
+#-----------------------------------------------------------------------------------------------------
+#SmartVM_Constructor_online_xy_abnormal.py
+from Data_PreProcess import Data_PreProcess_Train, Data_PreProcess_Test, OnLine_Data_PreProcess
+from XDI import XDI_off_line_report, Build_XDI_Model, OnLine_XDI
+from YDI import YDI_off_line_report, Build_YDI_Model, OnLine_YDI
+from MXCI_MYCI_pre import pre_MXCI_MYCI
+from MXCI_MYCI import MXCI_MYCI_offline, CI_online
+from XGB_model import xgb_online_predict
+from PLS_model import pls_online_predict_x_abnormal
+from Read_path import read_path
+from config import read_config
+from CreateLog import WriteLog
+from DB_operation import select_project_otm, select_project_by_projectid, select_project_config_by_modelid_parameter3RD, select_project_model_by_projectid_predictresult, select_online_parameter_by_projectid, select_projectx_parameter_data_by_runindex_parameter, select_projectx_predict_data_by_runindex_parameter_modelid, update_project_model_predictresult_by_modelid, update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid, insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict
+
+import os
+import json
+import traceback
+# from Data_Check import Data_Check
+from shutil import copyfile
+import pandas as pd
+import datetime
+import time
+import pyodbc
+
+
+class SuperVM():
+    def __init__(self, sorce_dir, train_data_name, config_file_name, batch_data_name_list=None):
+        self.base_path = os.path.join("../Cases/", sorce_dir)
+        self.base_name = os.path.basename(os.path.abspath(self.base_path))
+        self.train_data_name = train_data_name
+        self.train_base, self.ext = os.path.splitext(self.train_data_name)
+        self.train_data = os.path.join(self.base_path, train_data_name)
+        self.config_file = os.path.join(self.base_path, config_file_name)
+        if batch_data_name_list:
+            self.batch_data = [os.path.join(self.base_path, x) for x in batch_data_name_list]
+        self.in_path = os.path.join(self.base_path, "path_config.json")
+        self.mdoel_dict = {}
+        self.mdoel_dict["3"] = {}
+        self.mdoel_dict["3"]["Train"] = Data_PreProcess_Train
+        self.mdoel_dict["3"]["Test"] = Data_PreProcess_Test
+        self.mdoel_dict["4"] = {}
+        self.mdoel_dict["4"]["Train"] = Build_XDI_Model
+        self.mdoel_dict["4"]["Test"] = XDI_off_line_report
+        self.mdoel_dict["5"] = {}
+        self.mdoel_dict["5"]["Train"] = Build_YDI_Model
+        self.mdoel_dict["5"]["Test"] = YDI_off_line_report
+        self.mdoel_dict["8"] = {}
+        self.mdoel_dict["8"]["Train"] = pre_MXCI_MYCI
+        self.mdoel_dict["8"]["Test"] = MXCI_MYCI_offline
+
+        self.retrain_data = os.path.join(self.base_path, "retrain_data.csv")
+        if not os.path.exists(self.retrain_data):
+            copyfile(self.train_data, self.retrain_data)
+
+        # Other Variables initialized in methods
+        self.filter_feature = None
+        self.feature_lists = None
+        self.current_retrain_number = None
+        self.current_batch_number = None
+        self.path_config = None
+        self.filter_feature_dict = None
+        # self.filter_dir_path = None
+        self.filter_dir_name = None
+
+########################################################################################################################
+    def get_saved_path_config(self):
+        try:
+            with open(self.in_path) as json_data:
+                self.path_config = json.load(json_data)
+        except Exception as e:
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading path_config.json")
+                file.write(traceback.format_exc(e))
+            raise FileNotFoundError
+        return None
+
+########################################################################################################################
+    def get_max_retrain_num(self, retrain_num=None):
+        if retrain_num is None:
+            try:
+                first_key = list(self.path_config.keys())[0]
+                key_list = list(self.path_config[first_key].keys())
+                key_list.remove("main")
+                return max([int(x) for x in key_list])
+            except:
+                try:
+                    self.get_saved_path_config()
+                    first_key = list(self.path_config.keys())[0]
+                    key_list = list(self.path_config[first_key].keys())
+                    key_list.remove("main")
+                    return max([int(x) for x in key_list])
+                except Exception as e:
+                    raise FileNotFoundError("path_config not found")
+        else:
+            return retrain_num
+
+    def get_max_batch_num(self, retrain_num, batch_num=None):
+        if batch_num is None:
+            first_key = list(self.path_config.keys())[0]
+            key_list = list(self.path_config[first_key][str(retrain_num)].keys())
+            key_list.remove("main")
+            return max([int(x) for x in key_list])
+        else:
+            return batch_num
+    
+    def model_predict_online_x(self, df_online_X, path_dict):
+        xgb_y_pred = xgb_online_predict(path_dict['6']["XGB"]["5"], df_online_X) #20190702 eat 05_Prediction  
+        #20190702 mark temporarily
+        pls_online_predict_x_abnormal(path_dict['6']["PLS"]["5"], df_online_X)
+        
+        input_path = read_path(path_dict['6']["PLS"]["5"])
+        mylog = WriteLog(input_path["log_path"], input_path["error_path"])    
+        config = read_config(input_path["config_path"], mylog)
+        config_y = config["Y"][0]
+        Baseline_Model = config["Model_Selection"][config_y]["Baseline_Model"]  
+        pls_y_name = config["Y"][0]+"_pred_PLS"
+        
+        #20190702 mark temporarily
+        pls_predict_test_path = os.path.join(path_dict['6']["PLS"]["5"], "trainPredResult.csv")
+        pls_test=pd.read_csv(pls_predict_test_path)
+        pls_test.rename({'Y_pred': pls_y_name}, axis=1, inplace=True) #20190722 after pls predict, must rename
+        #pls_y_pred = pls_test['Y_pred']
+        pls_y_pred = pls_test[pls_y_name]
+        #pls_y_pred = xgb_y_pred * 1.2
+        #20190709 for pls_y_pred null
+        if len(pls_y_pred) == 0:
+            pls_y_predc = 0
+        else:
+            pls_y_predc = pls_y_pred[0] #20190621 because return series, must assign location
+
+        if Baseline_Model == "PLS":
+            #20190702 mark temporarily
+            return xgb_y_pred, pls_y_predc 
+            #return xgb_y_pred, pls_y_pred
+        else:
+            #20190702 mark temporarily
+            return pls_y_predc, xgb_y_pred
+            #return pls_y_pred, xgb_y_pred
+    
+    def online_xy_phase(self, projectid, base_name, retrain_num, batch_num=None):
+        retrain_num = self.get_max_retrain_num(retrain_num)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+        """
+        SVM_PROJECT_FORRETRAIN = select_project_model_by_projectid(projectid) #20190708 avoid retrain cause predict error[find not file]
+        if SVM_PROJECT_FORRETRAIN.STATUS[0].upper() == "ONLINE":
+            path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+        else:
+            path_dict = self.path_config[base_name][str(retrain_num-1)][str(batch_num)]
+        """
+        path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+        SVM_PROJECT_OTM = select_project_by_projectid(projectid)
+        
+        #20190620 get server name
+        server_name_1 = str(SVM_PROJECT_OTM.SERVER_NAME[0])
+        
+        db_name = "APC"
+        user = "YL"
+        password = "YL$212" 
+        cnxn2 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name_1 + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+        
+        project_id = "SVM_PROJECT" + str(SVM_PROJECT_OTM.PROJECT_ID[0])
+        
+        SVM_PROJECT_MODEL_ABNORMAL = select_project_model_by_projectid_predictresult(SVM_PROJECT_OTM.PROJECT_ID[0], "False", server_name_1)
+        
+        if len(SVM_PROJECT_MODEL_ABNORMAL) == 0:
+            print("no model in abnormal")
+        else:                    
+            SVM_PROJECT_CONFIG = select_project_config_by_modelid_parameter3RD(SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], "Y", server_name_1)
+            
+            if len(SVM_PROJECT_CONFIG) == 0:
+                print('config no data')                                                                                                                                                       
+            else:       
+                PREDICT_START_TIME = datetime.datetime.strftime(SVM_PROJECT_MODEL_ABNORMAL.PREDICT_START_TIME[0], '%Y-%m-%d %H:%M:%S.%f')[:-3]
+                RETRAIN_END_TIME = datetime.datetime.strftime(SVM_PROJECT_MODEL_ABNORMAL.RETRAIN_END_TIME[0], '%Y-%m-%d %H:%M:%S.%f')[:-3]
+                
+                sql = "select * from " + str(project_id) + r"_PARAMETER_DATA where PARAMETER = '" + str(SVM_PROJECT_CONFIG.PARAM_VALUE[0]) + r"' and ITIME > '" + PREDICT_START_TIME + r"' and ITIME < '" + RETRAIN_END_TIME + r"' order by ITIME" 
+                SVM_PARAMETER_DATA_y = pd.read_sql(sql, cnxn2)
+                
+                if len(SVM_PARAMETER_DATA_y) == 0:
+                    print('SVM_PARAMETER_DATA_y null') 
+                else:   
+                    for m in range(len(SVM_PARAMETER_DATA_y)): 
+                                                
+                        sql = "select * from " + str(project_id) + "_RUN where RUNINDEX = \'" + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + "\'"
+                        SVM_PROJECT_RUN = pd.read_sql(sql, cnxn2)
+                                              
+                        SVM_ONLINE_PARAMETER = select_online_parameter_by_projectid(SVM_PROJECT_OTM.PROJECT_ID[0], server_name_1)
+                        
+                        for k in range(len(SVM_ONLINE_PARAMETER)):
+                                                  
+                            if str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'TOOLID':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.TOOLID[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'LOTNAME':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.LOTNAME[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FOUPNAME':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FOUPNAME[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'OPID':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.OPID[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'RECIPE':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.RECIPE[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'ABBRID':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.ABBRID[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'PRODUCT':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.PRODUCT[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'MODELNO':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.MODELNO[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'CHAMBER':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.CHAMBER[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SHEETID':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SHEETID[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SLOTNO':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SLOTNO[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'POINT':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.POINT[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FILTER_FEATURE':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FILTER_FEATURE[0])],axis=1)
+                            else:
+                                SVM_PARAMETER_DATA_tmp = select_projectx_parameter_data_by_runindex_parameter(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k], server_name_1)
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PARAMETER_DATA_tmp.PARAM_VALUE[0])],axis=1)
+                            
+                            if k == 0:
+                                SVM_PARAMETER_DATA = SVM_PARAMETER_DATA_part
+                            else:
+                                SVM_PARAMETER_DATA = pd.concat([SVM_PARAMETER_DATA, SVM_PARAMETER_DATA_part], axis=0, ignore_index=True)
+                            
+                            SVM_PARAMETER_DATA_part = SVM_PARAMETER_DATA_part.iloc[0:0] #20190710 clear dataframe data
+                                                                                                                                                                                                                           
+                        if len(SVM_PARAMETER_DATA) == 0:
+                            print('SVM_PARAMETER_DATA null')  #20190619 add inert sql in the future
+                        else:
+                            #df_SVM_PARAMETER_DATA_lite=SVM_PARAMETER_DATA.drop(['RUNINDEX','ITIME'], axis=1)
+                            df_SVM_PARAMETER_DATA_lite_T = SVM_PARAMETER_DATA.T #20190619 行列互轉
+                            headers = df_SVM_PARAMETER_DATA_lite_T.iloc[0] #20190619 first row set header
+                            df_SVM_PARAMETER_DATA_lite_T_H  = pd.DataFrame(df_SVM_PARAMETER_DATA_lite_T.values[1:], columns=headers)
+                            
+                            df_online_X, df_online_y = OnLine_Data_PreProcess(df_SVM_PARAMETER_DATA_lite_T_H, path_dict['3']["3"])
+                            XDI_online_value, XDI_Threshold, XDI_Check, df_contri = OnLine_XDI(df_online_X, path_dict['4']["3"])
+                            df_YDI_online = OnLine_YDI(df_online_X, df_online_y, path_dict['5']["3"])
+                            y_pred, y_base = self.model_predict_online_x(df_online_X, path_dict)
+                            MXCI_value, MXCI_T, MYCI_value, MYCI_T, light = CI_online(path_dict['8']["3"], df_online_X, y_pred, y_base)
+    
+                            if XDI_online_value is not None:
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'XDI', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'XDI', XDI_online_value, SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 1, server_name_1)                                
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, XDI_online_value, 1, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'XDI', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                                      
+                            if XDI_Threshold is not None:
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'XDI_Threshold', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:  
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'XDI_Threshold', XDI_Threshold, SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 1, server_name_1)  
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, XDI_Threshold, 1, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'XDI_Threshold', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)                                             
+                                                                                                           
+                            if y_pred is not None:
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'Predict_Y', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'Predict_Y', y_pred, SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 1, server_name_1)                                  
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, y_pred, 1, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'Predict_Y', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                            
+                            if y_base is not None:
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'y_base', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'y_base', y_base, SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 1, server_name_1)                                  
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, y_base, 1, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'y_base', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                            
+                            if MXCI_value is not None:
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MXCI', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:   
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MXCI', MXCI_value, SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 1, server_name_1)  
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, MXCI_value, 1, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MXCI', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                
+                            if MXCI_T is not None:
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MXCI_Threshold', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MXCI_Threshold', MXCI_T, SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 1, server_name_1)                                    
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, MXCI_T, 1, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MXCI_Threshold', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                
+                            if MYCI_value is not None:
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MYCI', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                MYCI_value = float(str(MYCI_value)[0:10])
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MYCI', MYCI_value, SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 1, server_name_1)                                   
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, MYCI_value, 1, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MYCI', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                
+                            if MYCI_T is not None:
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MYCI_Threshold', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MYCI_Threshold', MYCI_T, SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 1, server_name_1)                                    
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, MYCI_T, 1, SVM_PARAMETER_DATA_y.RUNINDEX[m], 'MYCI_Threshold', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                            
+                            if df_YDI_online is not None:
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Interval', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:  
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Interval', df_YDI_online.Interval[0], SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 0, server_name_1)                              
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.Interval[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Interval', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI', df_YDI_online.YDI[0], SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 0, server_name_1)                                           
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.YDI[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI_Threshold', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:   
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI_Threshold', df_YDI_online.YDI_Threshold[0], SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 0, server_name_1)                                   
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.YDI_Threshold[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI_Threshold', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Y_avg', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Y_avg', df_YDI_online.Y_avg[0], SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 0, server_name_1)                                                  
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.Y_avg[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Y_avg', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                
+                                SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Cluster_idx', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Cluster_idx', df_YDI_online.Cluster_idx[0], SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], 0, server_name_1)                                                  
+                                else: 
+                                    update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.Cluster_idx[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Cluster_idx', SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)
+                              
+                    update_project_model_predictresult_by_modelid("True", SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], server_name_1)                                                                                        
+        return None
+    
+    def one_to_all_online_xy(self, projectid, retrain_num):          
+        retrain_num = self.get_max_retrain_num(retrain_num=retrain_num)
+        self.get_saved_path_config() #20190715 get path_config
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+        self.online_xy_phase(projectid, base_name=self.base_name, retrain_num=retrain_num, batch_num=batch_num)
+        
+        return None
+ 
+if __name__ == '__main__':        
+    #20190627 online data must go 10.96.18.199, get SERVER_NAME to the server
+    def timer(n):
+        while True: 
+            SVM_PROJECT_OTM = select_project_otm()
+            
+            if len(SVM_PROJECT_OTM) != 0:
+                
+                for a in range(len(SVM_PROJECT_OTM)):
+                    
+                    projectid = SVM_PROJECT_OTM.PROJECT_ID[a]
+                    SVM_PROJECT_MODEL_OTM = select_project_model_by_projectid_predictresult(projectid, "False") 
+                    
+                    if len(SVM_PROJECT_MODEL_OTM) != 0:
+                                            
+                        SVM = SuperVM(str(SVM_PROJECT_OTM.PROJECT_NAME[a]), str(SVM_PROJECT_OTM.UPLOAD_FILE[a]), r"Config.json")                                                                           
+                        retrain_num = int(SVM_PROJECT_MODEL_OTM.MODEL_SEQ[0])
+                        SVM.one_to_all_online_xy(projectid, retrain_num)
+                        
+                    else:
+                        print("SVM_PROJECT_MODEL_OTM None")
+                                     
+            time.sleep(n)
+    timer(5) 
+    
+#------------------------------------------------------------------------------
+#SmartVM_Constructor_online_xy_many_abnormal.py
+from Data_PreProcess import Data_PreProcess_Train, Data_PreProcess_Test, OnLine_Data_PreProcess
+from XDI import XDI_off_line_report, Build_XDI_Model, OnLine_XDI
+from YDI import YDI_off_line_report, Build_YDI_Model, OnLine_YDI
+from MXCI_MYCI_pre import pre_MXCI_MYCI
+from MXCI_MYCI import MXCI_MYCI_offline, CI_online
+from XGB_model import xgb_online_predict
+from PLS_model import pls_online_predict_x_many_abnormal
+from Read_path import read_path
+from config import read_config
+from CreateLog import WriteLog
+from DB_operation import select_project_mtm, select_project_by_projectid, select_project_model_by_projectid_predictresult, select_project_model_by_projectid_status2_filterfeature, select_project_config_by_modelid_parameter3RD, select_online_parameter_by_projectid, select_projectx_parameter_data_by_runindex_parameter, select_projectx_parameter_data_by_parameter_itime_itime, select_projectx_predict_data_by_runindex_parameter_modelid, update_project_model_predictresult_by_modelid, update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid, insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict
+
+import os
+import json
+import traceback
+# from Data_Check import Data_Check
+
+from shutil import copyfile
+import pandas as pd
+import pyodbc
+import datetime
+import time
+
+
+class SuperVM():
+    def __init__(self, sorce_dir, train_data_name, config_file_name, batch_data_name_list=None):
+        self.base_path = os.path.join("../Cases/", sorce_dir)
+        self.base_name = os.path.basename(os.path.abspath(self.base_path))
+        self.train_data_name = train_data_name
+        self.train_base, self.ext = os.path.splitext(self.train_data_name)
+        self.train_data = os.path.join(self.base_path, train_data_name)
+        self.config_file = os.path.join(self.base_path, config_file_name)
+        if batch_data_name_list:
+            self.batch_data = [os.path.join(self.base_path, x) for x in batch_data_name_list]
+        self.in_path = os.path.join(self.base_path, "path_config.json")
+        self.mdoel_dict = {}
+        self.mdoel_dict["3"] = {}
+        self.mdoel_dict["3"]["Train"] = Data_PreProcess_Train
+        self.mdoel_dict["3"]["Test"] = Data_PreProcess_Test
+        self.mdoel_dict["4"] = {}
+        self.mdoel_dict["4"]["Train"] = Build_XDI_Model
+        self.mdoel_dict["4"]["Test"] = XDI_off_line_report
+        self.mdoel_dict["5"] = {}
+        self.mdoel_dict["5"]["Train"] = Build_YDI_Model
+        self.mdoel_dict["5"]["Test"] = YDI_off_line_report
+        self.mdoel_dict["8"] = {}
+        self.mdoel_dict["8"]["Train"] = pre_MXCI_MYCI
+        self.mdoel_dict["8"]["Test"] = MXCI_MYCI_offline
+
+        self.retrain_data = os.path.join(self.base_path, "retrain_data.csv")
+        if not os.path.exists(self.retrain_data):
+            copyfile(self.train_data, self.retrain_data)
+
+        # Other Variables initialized in methods
+        self.filter_feature = None
+        self.feature_lists = None
+        self.current_retrain_number = None
+        self.current_batch_number = None
+        self.path_config = None
+        self.filter_feature_dict = None
+        # self.filter_dir_path = None
+        self.filter_dir_name = None
+
+    def get_filter_feature(self):
+        try:
+            with open(self.config_file) as json_data:
+                config = json.load(json_data)
+        except Exception as e:
+            config = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading config file\n")
+                file.write(traceback.format_exc(e))
+                raise FileNotFoundError
+        self.filter_feature = config["Filter_Feature"]
+        self.model_pred_name = config["Model_Pred_Name"]
+        return None
+
+    def get_feature_content(self, split_flag=None):
+        try:
+            training_data = pd.read_csv(self.train_data)
+        except Exception as e:
+            training_data = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading raw data\n")
+                file.write(str(e) + "\n")
+                file.write(traceback.format_exc())
+                raise FileNotFoundError
+        self.feature_lists = training_data[self.filter_feature].unique().tolist()
+        self.feature_lists.sort()
+        if split_flag is not None:
+            self.filter_feature_dict = {}
+            for feature_list in self.feature_lists:
+                tmp_data = training_data[training_data[self.filter_feature] == feature_list].copy().reset_index(drop=True)
+                self.filter_feature_dict[feature_list] = \
+                    os.path.join(self.base_path, self.train_base + "_" + self.filter_feature + "_" + str(feature_list) + self.ext)
+                tmp_data.to_csv(self.filter_feature_dict[feature_list], index=False)
+        return None
+
+########################################################################################################################
+    def get_saved_path_config(self):
+        try:
+            with open(self.in_path) as json_data:
+                self.path_config = json.load(json_data)
+        except Exception as e:
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading path_config.json")
+                file.write(traceback.format_exc(e))
+            raise FileNotFoundError
+        return None
+
+########################################################################################################################
+    def get_max_retrain_num(self, retrain_num=None):
+        if retrain_num is None:
+            try:
+                first_key = list(self.path_config.keys())[0]
+                key_list = list(self.path_config[first_key].keys())
+                key_list.remove("main")
+                return max([int(x) for x in key_list])
+            except:
+                try:
+                    self.get_saved_path_config()
+                    first_key = list(self.path_config.keys())[0]
+                    key_list = list(self.path_config[first_key].keys())
+                    key_list.remove("main")
+                    return max([int(x) for x in key_list])
+                except Exception as e:
+                    raise FileNotFoundError("path_config not found")
+        else:
+            return retrain_num
+
+    def get_max_batch_num(self, retrain_num, batch_num=None):
+        if batch_num is None:
+            first_key = list(self.path_config.keys())[0]
+            key_list = list(self.path_config[first_key][str(retrain_num)].keys())
+            key_list.remove("main")
+            return max([int(x) for x in key_list])
+        else:
+            return batch_num 
+    
+    def model_predict_online_x(self, df_online_X, path_dict):
+        xgb_y_pred = xgb_online_predict(path_dict['6']["XGB"]["5"], df_online_X) #20190702 eat 05_Prediction  
+        #20190702 mark temporarily
+        pls_online_predict_x_many_abnormal(path_dict['6']["PLS"]["5"], df_online_X)
+        
+        input_path = read_path(path_dict['6']["PLS"]["5"])
+        mylog = WriteLog(input_path["log_path"], input_path["error_path"])    
+        config = read_config(input_path["config_path"], mylog)
+        config_y = config["Y"][0]
+        Baseline_Model = config["Model_Selection"][config_y]["Baseline_Model"]    
+        pls_y_name = config["Y"][0]+"_pred_PLS"
+        
+        #20190702 mark temporarily
+        pls_predict_test_path = os.path.join(path_dict['6']["PLS"]["5"], "trainPredResult.csv")
+        pls_test=pd.read_csv(pls_predict_test_path)
+        pls_test.rename({'Y_pred': pls_y_name}, axis=1, inplace=True) #20190722 after pls predict, must rename
+        #pls_y_pred = pls_test['Y_pred']
+        pls_y_pred = pls_test[pls_y_name]
+        #pls_y_pred = xgb_y_pred * 1.2
+
+        if Baseline_Model == "PLS":
+            #20190702 mark temporarily
+            return xgb_y_pred, pls_y_pred[0] #20190621 because return series, must assign location
+            #return xgb_y_pred, pls_y_pred
+        else:
+            #20190702 mark temporarily
+            return pls_y_pred[0], xgb_y_pred
+            #return pls_y_pred, xgb_y_pred    
+    
+    def online_xy_many_phase(self, projectid, base_name, retrain_num, batch_num=None):
+        retrain_num = self.get_max_retrain_num(retrain_num)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+
+        path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+        SVM_PROJECT_MTM = select_project_by_projectid(projectid)
+        
+        #server_name = "10.96.18.199"
+        db_name = "APC"
+        user = "YL"
+        password = "YL$212"                  
+                
+        #20190620 get server name
+        server_name_1 = str(SVM_PROJECT_MTM.SERVER_NAME[0])
+        cnxn2 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name_1 + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+                
+        project_id = "SVM_PROJECT" + str(SVM_PROJECT_MTM.PROJECT_ID[0])
+
+        SVM_PROJECT_MODEL_ABNORMAL = select_project_model_by_projectid_predictresult(SVM_PROJECT_MTM.PROJECT_ID[0], "False", server_name_1)
+        
+        if len(SVM_PROJECT_MODEL_ABNORMAL) == 0:
+            print("no model in manay abnormal")
+        else:                   
+            SVM_PROJECT_CONFIG = select_project_config_by_modelid_parameter3RD(SVM_PROJECT_MODEL_ABNORMAL.MODEL_ID[0], "Y", server_name_1)
+            
+            if len(SVM_PROJECT_CONFIG) == 0:
+                print('config no data')                                                                                                                                                       
+            else:     
+                PREDICT_START_TIME = datetime.datetime.strftime(SVM_PROJECT_MODEL_ABNORMAL.PREDICT_START_TIME[0], '%Y-%m-%d %H:%M:%S.%f')[:-3]
+                RETRAIN_END_TIME = datetime.datetime.strftime(SVM_PROJECT_MODEL_ABNORMAL.RETRAIN_END_TIME[0], '%Y-%m-%d %H:%M:%S.%f')[:-3]
+                
+                #sql = "select * from " + str(project_id) + r"_PARAMETER_DATA where PARAMETER = '" + str(SVM_PROJECT_CONFIG.PARAM_VALUE[0]) + r"' and ITIME > '" + PREDICT_START_TIME + r"' and ITIME < '" + RETRAIN_END_TIME + r"' order by ITIME" 
+                #SVM_PARAMETER_DATA_y = pd.read_sql(sql, cnxn2)
+                SVM_PARAMETER_DATA_y = select_projectx_parameter_data_by_parameter_itime_itime(project_id, SVM_PROJECT_CONFIG.PARAM_VALUE[0], PREDICT_START_TIME, RETRAIN_END_TIME, server_name_1)
+                
+                if len(SVM_PARAMETER_DATA_y) == 0:
+                    print('SVM_PARAMETER_DATA_y null') 
+                else:   
+                    for m in range(len(SVM_PARAMETER_DATA_y)): 
+                        
+                        FILTER_FEATURE = SVM_PROJECT_CONFIG.PARAM_VALUE[0]                        
+                        sql = "select * from " + str(project_id) + "_RUN where RUNINDEX = \'" + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + "\'"
+                        SVM_PROJECT_RUN = pd.read_sql(sql, cnxn2)
+                        
+                        if len(SVM_PROJECT_RUN) != 0:
+                            
+                            index = base_name.rfind("_")
+                            current_p = base_name[index+1:]
+                            
+                            try:
+                                db_p = SVM_PROJECT_RUN[FILTER_FEATURE][0]
+                            except:
+                                db_p = SVM_PROJECT_RUN['FILTER_FEATURE'][0]
+                                                                
+                            if current_p == db_p:
+
+                                SVM_ONLINE_PARAMETER = select_online_parameter_by_projectid(SVM_PROJECT_MTM.PROJECT_ID[0], server_name_1)
+                        
+                                for k in range(len(SVM_ONLINE_PARAMETER)):
+                                                          
+                                    if str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'TOOLID':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.TOOLID[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'LOTNAME':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.LOTNAME[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FOUPNAME':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FOUPNAME[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'OPID':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.OPID[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'RECIPE':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.RECIPE[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'ABBRID':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.ABBRID[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'PRODUCT':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.PRODUCT[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'MODELNO':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.MODELNO[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'CHAMBER':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.CHAMBER[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SHEETID':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SHEETID[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SLOTNO':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SLOTNO[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'POINT':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.POINT[0])],axis=1)
+                                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FILTER_FEATURE':                           
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FILTER_FEATURE[0])],axis=1)
+                                    else:
+                                        SVM_PARAMETER_DATA_tmp = select_projectx_parameter_data_by_runindex_parameter(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[m], SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k], server_name_1)
+                                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PARAMETER_DATA_tmp.PARAM_VALUE[0])],axis=1)
+                                    
+                                    if k == 0:
+                                        SVM_PARAMETER_DATA = SVM_PARAMETER_DATA_part
+                                    else:
+                                        SVM_PARAMETER_DATA = pd.concat([SVM_PARAMETER_DATA, SVM_PARAMETER_DATA_part], axis=0, ignore_index=True)
+                                    
+                                    SVM_PARAMETER_DATA_part = SVM_PARAMETER_DATA_part.iloc[0:0]
+                                    
+                                if len(SVM_PARAMETER_DATA) == 0:
+                                    print('SVM_PARAMETER_DATA null')  #20190619 add inert sql in the future
+                                else:
+                                    #df_SVM_PARAMETER_DATA_lite=SVM_PARAMETER_DATA.drop(['RUNINDEX','ITIME'], axis=1)
+                                    df_SVM_PARAMETER_DATA_lite_T = SVM_PARAMETER_DATA.T #20190619 行列互轉
+                                    headers = df_SVM_PARAMETER_DATA_lite_T.iloc[0] #20190619 first row set header
+                                    df_SVM_PARAMETER_DATA_lite_T_H  = pd.DataFrame(df_SVM_PARAMETER_DATA_lite_T.values[1:], columns=headers)
+                                        
+                                    print("online x phase[ns]")
+                                    df_online_X, df_online_y = OnLine_Data_PreProcess(df_SVM_PARAMETER_DATA_lite_T_H, path_dict['3']["3"])
+                                    XDI_online_value, XDI_Threshold, XDI_Check, df_contri = OnLine_XDI(df_online_X, path_dict['4']["3"])
+                                    df_YDI_online = OnLine_YDI(df_online_X, df_online_y, path_dict['5']["3"])
+                                    y_pred, y_base = self.model_predict_online_x(df_online_X, path_dict)
+                                    MXCI_value, MXCI_T, MYCI_value, MYCI_T, light = CI_online(path_dict['8']["3"], df_online_X, y_pred, y_base)
+                                    """
+                                    if SVM_PROJECT_RUN.FILTER_FEATURE[0] is not None:
+                                        if SVM_PROJECT_RUN.FILTER_FEATURE[0] == 'Point_ID':
+                                            sql = "select * from SVM_PROJECT_MODEL where MODEL_NAME = \'" + self.base_name + "_POINT_" + SVM_PROJECT_RUN.POINT[0] + r"' AND UPPER(STATUS) in ('ABNORMAL','ABNORMAL->ONLINE')"
+                                        elif SVM_PROJECT_RUN.FILTER_FEATURE[0] == 'Sheet_ID':
+                                            sql = "select * from SVM_PROJECT_MODEL where MODEL_NAME = \'" + self.base_name + "_SHEET_" + SVM_PROJECT_RUN.SHEETID[0] + r"' AND UPPER(STATUS) in ('ABNORMAL','ABNORMAL->ONLINE')"                                
+                                        SVM_PROJECT_MODEL = pd.read_sql(sql, cnxn2)
+                                    """
+                                    try:
+                                        SVM_PROJECT_MODEL = select_project_model_by_projectid_status2_filterfeature(projectid, "ABNORMAL", "ABNORMAL->ONLINE", SVM_PROJECT_RUN[FILTER_FEATURE][0], server_name_1)
+                                    except:
+                                        SVM_PROJECT_MODEL = select_project_model_by_projectid_status2_filterfeature(projectid, "ABNORMAL", "ABNORMAL->ONLINE", SVM_PROJECT_RUN['FILTER_FEATURE'][0], server_name_1)
+                                    
+                                    if XDI_online_value is not None:
+                                        sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + r" and PARAMETER = 'XDI' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                        SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'XDI', XDI_online_value, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 1)
+                                            cursor1.execute(sql)       
+                                            cnxn2.commit()                                 
+                                        else: 
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", XDI_online_value, 1, int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'XDI', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                            cursor1.execute(sql)
+                                            cnxn2.commit()  
+                                                              
+                                    if XDI_Threshold is not None:
+                                        sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + r" and PARAMETER = 'XDI_Threshold' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                        SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'XDI_Threshold', XDI_Threshold, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 1)
+                                            cursor1.execute(sql)       
+                                            cnxn2.commit()                                 
+                                        else: 
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", XDI_Threshold, 1, int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'XDI_Threshold', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                            cursor1.execute(sql)
+                                            cnxn2.commit()                                                                                                  
+                                    
+                                    if y_pred is not None:
+                                        sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + r" and PARAMETER = 'Predict_Y' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                        SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'Predict_Y', y_pred, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 1, now)
+                                            cursor1.execute(sql)       
+                                            cnxn2.commit()                                   
+                                        else: 
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", y_pred, 1, int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'Predict_Y', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                            cursor1.execute(sql)
+                                            cnxn2.commit()     
+                                    
+                                    if y_base is not None:
+                                        sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + r" and PARAMETER = 'y_base' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                        SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'y_base', y_base, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 1, now)
+                                            cursor1.execute(sql)       
+                                            cnxn2.commit()                                   
+                                        else: 
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", y_base, 1, int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'y_base', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                            cursor1.execute(sql)
+                                            cnxn2.commit() 
+                                    
+                                    if MXCI_value is not None:
+                                        sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + r" and PARAMETER = 'MXCI' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                        SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'MXCI', MXCI_value, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 1, now)
+                                            cursor1.execute(sql)       
+                                            cnxn2.commit()                                   
+                                        else: 
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", MXCI_value, 1, int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'MXCI', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                            cursor1.execute(sql)
+                                            cnxn2.commit()
+                                        
+                                    if MXCI_T is not None:
+                                        sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + r" and PARAMETER = 'MXCI_Threshold' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                        SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'MXCI_Threshold', MXCI_T, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 1, now)
+                                            cursor1.execute(sql)       
+                                            cnxn2.commit()                                  
+                                        else: 
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", MXCI_T, 1, int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'MXCI_Threshold', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                            cursor1.execute(sql)
+                                            cnxn2.commit()
+                                        
+                                    if MYCI_value is not None:
+                                        sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + r" and PARAMETER = 'MYCI' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                        SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                        MYCI_value = float(str(MYCI_value)[0:10])
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'MYCI', MYCI_value, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 1, now)
+                                            cursor1.execute(sql)       
+                                            cnxn2.commit()                                  
+                                        else: 
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", MYCI_value, 1, int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'MYCI', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                            cursor1.execute(sql)
+                                            cnxn2.commit()
+                                        
+                                    if MYCI_T is not None:
+                                        sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[m]) + r" and PARAMETER = 'MYCI_Threshold' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                        SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},\'{}\')'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'MYCI_Threshold', MYCI_T, int(SVM_PROJECT_MODEL.MODEL_ID[0]), 1, now)
+                                            cursor1.execute(sql)       
+                                            cnxn2.commit()                                  
+                                        else: 
+                                            now = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S')
+                                            cursor1 = cnxn2.cursor()
+                                            sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", MYCI_T, 1, int(SVM_PARAMETER_DATA_y.RUNINDEX[m]), 'MYCI_Threshold', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                            cursor1.execute(sql)
+                                            cnxn2.commit()      
+                                    
+                                    if df_YDI_online is not None:
+                                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Interval', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:  
+                                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Interval', df_YDI_online.Interval[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                              
+                                        else: 
+                                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.Interval[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Interval', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                        
+                                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI', df_YDI_online.YDI[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                           
+                                        else: 
+                                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.YDI[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                        
+                                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:   
+                                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI_Threshold', df_YDI_online.YDI_Threshold[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                   
+                                        else: 
+                                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.YDI_Threshold[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                        
+                                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Y_avg', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Y_avg', df_YDI_online.Y_avg[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                                  
+                                        else: 
+                                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.Y_avg[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Y_avg', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                        
+                                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Cluster_idx', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Cluster_idx', df_YDI_online.Cluster_idx[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                                  
+                                        else: 
+                                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.Cluster_idx[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Cluster_idx', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                                                    
+                    update_project_model_predictresult_by_modelid("True", SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)               
+        return None
+    
+    def many_online_xy_phase(self, projectid, retrain_num, batch_num):
+        for feature in self.feature_lists:
+            self.online_xy_many_phase(projectid, base_name=self.filter_dir_name[feature], retrain_num=retrain_num, batch_num=batch_num)
+        return None
+
+        
+    def many_to_many_online_xy(self, projectid, retrain_num):
+        #self.batch_data = batch_data
+        retrain_num = self.get_max_retrain_num(retrain_num=retrain_num)
+
+        if self.filter_feature is None:
+            self.get_filter_feature()
+
+        if self.feature_lists is None:
+            self.get_feature_content()
+
+        if self.filter_dir_name is None:
+            self.filter_dir_name = {}
+            for feature in self.feature_lists:
+                self.filter_dir_name[feature] = self.base_name + "_" + self.filter_feature + "_" + str(feature)
+        
+        self.get_saved_path_config() #20190715 get path_config
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        self.many_online_xy_phase(projectid, retrain_num=retrain_num, batch_num=batch_num)
+
+        return None
+  
+if __name__ == '__main__':        
+    #20190627 online data must go 10.96.18.199, get SERVER_NAME to the server
+    def timer(n):
+        while True:
+            SVM_PROJECT_MTM = select_project_mtm()
+                                    
+            if len(SVM_PROJECT_MTM) != 0:
+                
+                for a in range(len(SVM_PROJECT_MTM)):
+                    
+                    projectid = SVM_PROJECT_MTM.PROJECT_ID[a]  
+                    SVM_PROJECT_MODEL_MTM = select_project_model_by_projectid_predictresult(projectid, "False") 
+                    
+                    if len(SVM_PROJECT_MODEL_MTM) != 0:
+                                          
+                        SVM = SuperVM(str(SVM_PROJECT_MTM.PROJECT_NAME[a]), str(SVM_PROJECT_MTM.UPLOAD_FILE[a]), r"Config.json")                                                              
+                        retrain_num = int(SVM_PROJECT_MODEL_MTM.MODEL_SEQ[0])                  
+                        SVM.many_to_many_online_xy(projectid, retrain_num) 
+                    
+                    else:
+                        print("SVM_PROJECT_MODEL_MTM None")
+                                   
+            time.sleep(n)
+    timer(5) 
+    
+#------------------------------------------------------------------------------
+#SmartVM_Constructor_online_y.py
+from Data_PreProcess import Data_PreProcess_Train, Data_PreProcess_Test, OnLine_Data_PreProcess
+from XDI import XDI_off_line_report, Build_XDI_Model
+from YDI import YDI_off_line_report, Build_YDI_Model, OnLine_YDI
+from MXCI_MYCI_pre import pre_MXCI_MYCI
+from MXCI_MYCI import MXCI_MYCI_offline
+from DB_operation import select_project_config_by_modelid_parameter3RD, select_project_model_by_projectid, select_project_model_by_projectid_status, select_project_online_scantime_y, select_project_online_scantime_by_projectid_datatype, select_online_parameter_by_projectid, select_online_status_by_projectid_runindex, select_projectx_run_by_runindex, select_projectx_parameter_data_by_runindex_parameter, select_projectx_parameter_data_by_parameter_itime, select_projectx_predict_data_by_runindex_parameter_modelid, update_online_scantime_lastscantime_by_projectid_datatype, update_online_status_ydialarm_by_projectid_runindex, update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid, update_projectx_run_ydialarm_by_runindex, insert_online_status_projectid_runindex_ydialarm_itime, insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict
+
+import os
+import json
+import traceback
+# from Data_Check import Data_Check
+from shutil import copyfile
+import pandas as pd
+import datetime
+import time
+
+
+class SuperVM():
+    def __init__(self, sorce_dir, train_data_name, config_file_name, batch_data_name_list=None):
+        self.base_path = os.path.join("../Cases/", sorce_dir)
+        self.base_name = os.path.basename(os.path.abspath(self.base_path))
+        self.train_data_name = train_data_name
+        self.train_base, self.ext = os.path.splitext(self.train_data_name)
+        self.train_data = os.path.join(self.base_path, train_data_name)
+        self.config_file = os.path.join(self.base_path, config_file_name)
+        if batch_data_name_list:
+            self.batch_data = [os.path.join(self.base_path, x) for x in batch_data_name_list]
+        self.in_path = os.path.join(self.base_path, "path_config.json")
+        self.mdoel_dict = {}
+        self.mdoel_dict["3"] = {}
+        self.mdoel_dict["3"]["Train"] = Data_PreProcess_Train
+        self.mdoel_dict["3"]["Test"] = Data_PreProcess_Test
+        self.mdoel_dict["4"] = {}
+        self.mdoel_dict["4"]["Train"] = Build_XDI_Model
+        self.mdoel_dict["4"]["Test"] = XDI_off_line_report
+        self.mdoel_dict["5"] = {}
+        self.mdoel_dict["5"]["Train"] = Build_YDI_Model
+        self.mdoel_dict["5"]["Test"] = YDI_off_line_report
+        self.mdoel_dict["8"] = {}
+        self.mdoel_dict["8"]["Train"] = pre_MXCI_MYCI
+        self.mdoel_dict["8"]["Test"] = MXCI_MYCI_offline
+
+        self.retrain_data = os.path.join(self.base_path, "retrain_data.csv")
+        if not os.path.exists(self.retrain_data):
+            copyfile(self.train_data, self.retrain_data)
+
+        # Other Variables initialized in methods
+        self.filter_feature = None
+        self.feature_lists = None
+        self.current_retrain_number = None
+        self.current_batch_number = None
+        self.path_config = None
+        self.filter_feature_dict = None
+        # self.filter_dir_path = None
+        self.filter_dir_name = None
+
+########################################################################################################################
+    def get_saved_path_config(self):
+        try:
+            with open(self.in_path) as json_data:
+                self.path_config = json.load(json_data)
+        except Exception as e:
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading path_config.json")
+                file.write(traceback.format_exc(e))
+            raise FileNotFoundError
+        return None
+
+########################################################################################################################
+    def get_max_retrain_num(self, retrain_num=None):
+        if retrain_num is None:
+            try:
+                first_key = list(self.path_config.keys())[0]
+                key_list = list(self.path_config[first_key].keys())
+                key_list.remove("main")
+                return max([int(x) for x in key_list])
+            except:
+                try:
+                    self.get_saved_path_config()
+                    first_key = list(self.path_config.keys())[0]
+                    key_list = list(self.path_config[first_key].keys())
+                    key_list.remove("main")
+                    return max([int(x) for x in key_list])
+                except Exception as e:
+                    raise FileNotFoundError("path_config not found")
+        else:
+            return retrain_num
+
+    def get_max_batch_num(self, retrain_num, batch_num=None):
+        if batch_num is None:
+            first_key = list(self.path_config.keys())[0]
+            key_list = list(self.path_config[first_key][str(retrain_num)].keys())
+            key_list.remove("main")
+            return max([int(x) for x in key_list])
+        else:
+            return batch_num    
+    
+    #20190710 Predict YDI never enter abnormal mode
+    def online_y_phase(self, projectid, datatype, base_name, retrain_num, batch_num=None):
+        retrain_num = self.get_max_retrain_num(retrain_num)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+        """
+        SVM_PROJECT_FORRETRAIN = select_project_model_by_projectid(projectid)
+        if SVM_PROJECT_FORRETRAIN.STATUS[0].upper() == "RETRAIN":
+            path_dict = self.path_config[base_name][str(retrain_num-1)][str(batch_num)]
+        elif SVM_PROJECT_FORRETRAIN.STATUS[0].upper() == "ONLINE":
+            path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+        """
+        path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]                        
+        SVM_PROJECT_ONLINE_SCANTIME = select_project_online_scantime_by_projectid_datatype(projectid, datatype)
+        #20190620 get server name
+        server_name_1 = str(SVM_PROJECT_ONLINE_SCANTIME.SERVER_NAME[0])
+             
+        project_id = "SVM_PROJECT" + str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0])
+        
+        SVM_PROJECT_MODEL = select_project_model_by_projectid_status(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], "ONLINE", server_name_1)
+        
+        SVM_PROJECT_CONFIG = select_project_config_by_modelid_parameter3RD(SVM_PROJECT_MODEL.MODEL_ID[0], "Y", server_name_1)
+        
+        if len(SVM_PROJECT_CONFIG) == 0:
+            print('config no data')                                                                                                                                                       
+        else:                      
+            LAST_SCANTIME = datetime.datetime.strftime(SVM_PROJECT_ONLINE_SCANTIME.LAST_SCANTIME[0], '%Y-%m-%d %H:%M:%S.%f')[:-3]
+            #sql = "select * from " + str(project_id) + r"_PARAMETER_DATA where PARAMETER = '" + str(SVM_PROJECT_CONFIG.PARAM_VALUE[0].upper()) + r"' and ITIME > '" + LAST_SCANTIME + r"' order by ITIME"                
+            #SVM_PARAMETER_DATA_y = pd.read_sql(sql, cnxn2)
+            SVM_PARAMETER_DATA_y = select_projectx_parameter_data_by_parameter_itime(project_id, SVM_PROJECT_CONFIG.PARAM_VALUE[0], LAST_SCANTIME, server_name_1)
+            
+            if len(SVM_PARAMETER_DATA_y) == 0:
+                print('SVM_PARAMETER_DATA_y null') 
+            else:                                                   
+                #sql = "select * from " + str(project_id) + "_RUN where RUNINDEX = \'" + str(SVM_PARAMETER_DATA_y.RUNINDEX[0]) + "\'"
+                #SVM_PROJECT_RUN = pd.read_sql(sql, cnxn2)
+                SVM_PROJECT_RUN = select_projectx_run_by_runindex(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], server_name_1)
+                update_online_scantime_lastscantime_by_projectid_datatype(SVM_PARAMETER_DATA_y.ITIME[0], SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], 'Y', server_name_1)
+
+                SVM_ONLINE_PARAMETER = select_online_parameter_by_projectid(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], server_name_1)
+                
+                for k in range(len(SVM_ONLINE_PARAMETER)):
+                                          
+                    if str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'TOOLID':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.TOOLID[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'LOTNAME':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.LOTNAME[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FOUPNAME':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FOUPNAME[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'OPID':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.OPID[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'RECIPE':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.RECIPE[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'ABBRID':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.ABBRID[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'PRODUCT':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.PRODUCT[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'MODELNO':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.MODELNO[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'CHAMBER':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.CHAMBER[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SHEETID':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SHEETID[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SLOTNO':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SLOTNO[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'POINT':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.POINT[0])],axis=1)
+                    elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FILTER_FEATURE':                           
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FILTER_FEATURE[0])],axis=1)
+                    else:
+                        SVM_PARAMETER_DATA_tmp = select_projectx_parameter_data_by_runindex_parameter(project_id, SVM_PROJECT_RUN.RUNINDEX[0], SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k], server_name_1)
+                        SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PARAMETER_DATA_tmp.PARAM_VALUE[0])],axis=1)
+                    
+                    if k == 0:
+                        SVM_PARAMETER_DATA = SVM_PARAMETER_DATA_part
+                    else:
+                        SVM_PARAMETER_DATA = pd.concat([SVM_PARAMETER_DATA, SVM_PARAMETER_DATA_part], axis=0, ignore_index=True)
+                    
+                    SVM_PARAMETER_DATA_part = SVM_PARAMETER_DATA_part.iloc[0:0]
+                
+                if len(SVM_PARAMETER_DATA) == 0:
+                    print('SVM_PARAMETER_DATA null')  #20190619 add inert sql in the future
+                else:
+                    #df_SVM_PARAMETER_DATA_lite=SVM_PARAMETER_DATA.drop(['RUNINDEX','ITIME'], axis=1)
+                    df_SVM_PARAMETER_DATA_lite_T = SVM_PARAMETER_DATA.T #20190619 行列互轉
+                    headers = df_SVM_PARAMETER_DATA_lite_T.iloc[0] #20190619 first row set header
+                    df_SVM_PARAMETER_DATA_lite_T_H  = pd.DataFrame(df_SVM_PARAMETER_DATA_lite_T.values[1:], columns=headers)
+                    
+                    print("online y phase[ns]")
+                    df_online_X, df_online_y = OnLine_Data_PreProcess(df_SVM_PARAMETER_DATA_lite_T_H, path_dict['3']["3"])
+                    df_YDI_online = OnLine_YDI(df_online_X, df_online_y, path_dict['5']["3"])
+                                       
+                    if df_YDI_online is not None:
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Interval', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:  
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Interval', df_YDI_online.Interval[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                              
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.Interval[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Interval', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI', df_YDI_online.YDI[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                           
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.YDI[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:   
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI_Threshold', df_YDI_online.YDI_Threshold[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                   
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.YDI_Threshold[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'YDI_Threshold', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Y_avg', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Y_avg', df_YDI_online.Y_avg[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                                  
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.Y_avg[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Y_avg', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        
+                        SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Cluster_idx', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                            insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(project_id, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Cluster_idx', df_YDI_online.Cluster_idx[0], SVM_PROJECT_MODEL.MODEL_ID[0], 0, server_name_1)                                                  
+                        else: 
+                            update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(project_id, df_YDI_online.Cluster_idx[0], 0, SVM_PARAMETER_DATA_y.RUNINDEX[0], 'Cluster_idx', SVM_PROJECT_MODEL.MODEL_ID[0], server_name_1)
+                        
+                        if int(df_YDI_online.YDI_Check[0]) == 0:
+                            SVM_ONLINE_STATUS = select_online_status_by_projectid_runindex(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], SVM_PARAMETER_DATA_y.RUNINDEX[0], server_name_1)
+                            if len(SVM_ONLINE_STATUS) == 0:      
+                                insert_online_status_projectid_runindex_ydialarm_itime(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], SVM_PARAMETER_DATA_y.RUNINDEX[0], 1, datetime.datetime.now(), server_name_1)
+                            else:
+                                update_online_status_ydialarm_by_projectid_runindex(1, SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], SVM_PARAMETER_DATA_y.RUNINDEX[0], server_name_1)
+                            update_projectx_run_ydialarm_by_runindex(project_id, 1, SVM_PARAMETER_DATA_y.RUNINDEX[0], server_name_1)   
+        return None
+    
+    def one_to_all_online_y(self, projectid, datatype, retrain_num):           
+        retrain_num = self.get_max_retrain_num(retrain_num=retrain_num)
+        self.get_saved_path_config()
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+        self.online_y_phase(projectid, datatype, base_name=self.base_name, retrain_num=retrain_num, batch_num=batch_num)
+        
+        return None
+  
+if __name__ == '__main__':        
+    #20190627 online data must go 10.96.18.199, get SERVER_NAME to the server
+    def timer(n):
+        while True:
+            
+            SVM_PROJECT_ONLINE_SCANTIME = select_project_online_scantime_y()                        
+            
+            if len(SVM_PROJECT_ONLINE_SCANTIME) != 0:
+                
+                for a in range(len(SVM_PROJECT_ONLINE_SCANTIME)):
+                                        
+                    projectid = SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[a]
+                    SVM_MODEL_ONLINE_Y = select_project_model_by_projectid_status(projectid, "ONLINE")
+                    
+                    if len(SVM_MODEL_ONLINE_Y) != 0:
+                        
+                        SVM = SuperVM(str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_NAME[a]), str(SVM_PROJECT_ONLINE_SCANTIME.UPLOAD_FILE[a]), r"Config.json")                
+                        datatype = SVM_PROJECT_ONLINE_SCANTIME.DATATYPE[a].upper()
+                        retrain_num = int(SVM_MODEL_ONLINE_Y.MODEL_SEQ[0]) 
+                        
+                        print("--------------")
+                        print(projectid)
+                        print(datatype)
+                        print(retrain_num)
+                        print("--------------")
+                        SVM.one_to_all_online_y(projectid, datatype, retrain_num)
+                    
+                    else:
+                        print("SVM_MODEL_ONLINE_Y None")
+                                 
+            time.sleep(n)
+    timer(5) 
+    
+#--------------------------------------------------------------------------------------
+#SmartVM_Constructor_online_y_many.py
+from Data_Preview import Data_Preview
+from Data_PreProcess import Data_PreProcess_Train, Data_PreProcess_Test, OnLine_Data_PreProcess, OnLine_Data_PreProcess_no_y
+from XDI import XDI_off_line_report, Build_XDI_Model, OnLine_XDI
+from YDI import YDI_off_line_report, Build_YDI_Model, OnLine_YDI
+from MXCI_MYCI_pre import pre_MXCI_MYCI
+from MXCI_MYCI import MXCI_MYCI_offline, CI_online
+from XGB_model import xgb_tuning, xgb_build, xgb_predict, xgb_merge_tuning, xgb_merge_predict, xgb_batch_predict, xgb_online_predict
+from PLS_model import pls_build, pls_predict, pls_merge_predict, pls_batch_predict, pls_online_predict_y_many
+from Read_path import read_path
+from config import read_config, save_config
+from CreateLog import WriteLog
+from DB_operation import DB_Connection, select_project_config_by_modelid_parameter3RD, select_project_model_by_projectid, select_project_model_by_projectid_status, select_project_model_by_projectid_predictresult, select_project_model_by_projectid_status_filterfeature, select_project_online_scantime_y_many, select_project_online_scantime_by_projectid_datatype, select_online_parameter_by_projectid, select_online_parameter_by_projectid_datatype, select_online_status_by_projectid_runindex, select_projectx_run_by_itime, select_projectx_parameter_data_by_runindex_parameter, select_projectx_predict_data_by_runindex_parameter_modelid, select_projectx_contribution_data_by_runindex_parameter_model, update_project_model_predictresult_by_modelid, update_online_scantime_lastscantime_by_projectid_datatype, update_online_status_xdialarm_by_projectid_runindex, update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid, update_projectx_run_xdialarm_by_runindex, update_projectx_run_ydialarm_by_runindex, update_projectx_contribution_data_contribution_by_runindex_parameter_model, insert_online_status_projectid_runindex_xdialarm_itime, insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict, insert_projectx_contribution_data_runindex_model_parameter_contribution
+
+import os
+import json
+import traceback
+from Path import All_path
+from Data_Collector import Data_Collector
+# from Data_Check import Data_Check
+from Exclusion import DataRemove, FeatureExclude
+
+from shutil import copyfile
+import numpy as np
+import pandas as pd
+import pyodbc
+import datetime
+import time
+
+
+class SuperVM():
+    def __init__(self, sorce_dir, train_data_name, config_file_name, batch_data_name_list=None):
+        self.base_path = os.path.join("../Cases/", sorce_dir)
+        self.base_name = os.path.basename(os.path.abspath(self.base_path))
+        self.train_data_name = train_data_name
+        self.train_base, self.ext = os.path.splitext(self.train_data_name)
+        self.train_data = os.path.join(self.base_path, train_data_name)
+        self.config_file = os.path.join(self.base_path, config_file_name)
+        if batch_data_name_list:
+            self.batch_data = [os.path.join(self.base_path, x) for x in batch_data_name_list]
+        self.in_path = os.path.join(self.base_path, "path_config.json")
+        self.mdoel_dict = {}
+        self.mdoel_dict["3"] = {}
+        self.mdoel_dict["3"]["Train"] = Data_PreProcess_Train
+        self.mdoel_dict["3"]["Test"] = Data_PreProcess_Test
+        self.mdoel_dict["4"] = {}
+        self.mdoel_dict["4"]["Train"] = Build_XDI_Model
+        self.mdoel_dict["4"]["Test"] = XDI_off_line_report
+        self.mdoel_dict["5"] = {}
+        self.mdoel_dict["5"]["Train"] = Build_YDI_Model
+        self.mdoel_dict["5"]["Test"] = YDI_off_line_report
+        self.mdoel_dict["8"] = {}
+        self.mdoel_dict["8"]["Train"] = pre_MXCI_MYCI
+        self.mdoel_dict["8"]["Test"] = MXCI_MYCI_offline
+
+        self.retrain_data = os.path.join(self.base_path, "retrain_data.csv")
+        if not os.path.exists(self.retrain_data):
+            copyfile(self.train_data, self.retrain_data)
+
+        # Other Variables initialized in methods
+        self.filter_feature = None
+        self.feature_lists = None
+        self.current_retrain_number = None
+        self.current_batch_number = None
+        self.path_config = None
+        self.filter_feature_dict = None
+        # self.filter_dir_path = None
+        self.filter_dir_name = None
+
+    def get_filter_feature(self):
+        try:
+            with open(self.config_file) as json_data:
+                config = json.load(json_data)
+        except Exception as e:
+            config = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading config file\n")
+                file.write(traceback.format_exc(e))
+                raise FileNotFoundError
+        self.filter_feature = config["Filter_Feature"]
+        self.model_pred_name = config["Model_Pred_Name"]
+        return None
+
+    def get_feature_content(self, split_flag=None):
+        try:
+            training_data = pd.read_csv(self.train_data)
+        except Exception as e:
+            training_data = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading raw data\n")
+                file.write(str(e) + "\n")
+                file.write(traceback.format_exc())
+                raise FileNotFoundError
+        self.feature_lists = training_data[self.filter_feature].unique().tolist()
+        self.feature_lists.sort()
+        if split_flag is not None:
+            self.filter_feature_dict = {}
+            for feature_list in self.feature_lists:
+                tmp_data = training_data[training_data[self.filter_feature] == feature_list].copy().reset_index(drop=True)
+                self.filter_feature_dict[feature_list] = \
+                    os.path.join(self.base_path, self.train_base + "_" + self.filter_feature + "_" + str(feature_list) + self.ext)
+                tmp_data.to_csv(self.filter_feature_dict[feature_list], index=False)
+        return None
+
+########################################################################################################################
+    def get_saved_path_config(self):
+        try:
+            with open(self.in_path) as json_data:
+                self.path_config = json.load(json_data)
+        except Exception as e:
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading path_config.json")
+                file.write(traceback.format_exc(e))
+            raise FileNotFoundError
+        return None
+
+########################################################################################################################
+    def get_max_retrain_num(self, retrain_num=None):
+        if retrain_num is None:
+            try:
+                first_key = list(self.path_config.keys())[0]
+                key_list = list(self.path_config[first_key].keys())
+                key_list.remove("main")
+                return max([int(x) for x in key_list])
+            except:
+                try:
+                    self.get_saved_path_config()
+                    first_key = list(self.path_config.keys())[0]
+                    key_list = list(self.path_config[first_key].keys())
+                    key_list.remove("main")
+                    return max([int(x) for x in key_list])
+                except Exception as e:
+                    raise FileNotFoundError("path_config not found")
+        else:
+            return retrain_num
+
+    def get_max_batch_num(self, retrain_num, batch_num=None):
+        if batch_num is None:
+            first_key = list(self.path_config.keys())[0]
+            key_list = list(self.path_config[first_key][str(retrain_num)].keys())
+            key_list.remove("main")
+            return max([int(x) for x in key_list])
+        else:
+            return batch_num
+    
+    #20190710 Predict YDI never enter abnormal mode
+    def online_y_many_phase(self, projectid, datatype, base_name, retrain_num, batch_num=None):
+        retrain_num = self.get_max_retrain_num(retrain_num)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+        """
+        SVM_PROJECT_FORRETRAIN = select_project_model_by_projectid(projectid)
+        if SVM_PROJECT_FORRETRAIN.STATUS[0].upper() == "RETRAIN":
+            path_dict = self.path_config[base_name][str(retrain_num-1)][str(batch_num)]
+        elif SVM_PROJECT_FORRETRAIN.STATUS[0].upper() == "ONLINE":
+            path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+        """
+        path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+        #server_name = "10.96.18.199"
+        db_name = "APC"
+        user = "YL"
+        password = "YL$212"                  
+        #cnxn1 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+                
+        #sql = "select * from SVM_PROJECT where PROJECT_NAME = \'" + self.base_name + "\'"
+        #SVM_PROJECT = pd.read_sql(sql, cnxn1)
+        
+        SVM_PROJECT_ONLINE_SCANTIME = select_project_online_scantime_by_projectid_datatype(projectid, datatype)
+        #20190620 get server name
+        server_name_1 = str(SVM_PROJECT_ONLINE_SCANTIME.SERVER_NAME[0])
+        cnxn2 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name_1 + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+        
+        project_id = "SVM_PROJECT" + str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0])
+        
+        #sql = "select * from SVM_ONLINE_SCANTIME where PROJECT_ID = \'" + str(SVM_PROJECT.PROJECT_ID[0]) + "\' and DATATYPE = \'Y\'"  
+        #SVM_ONLINE_SCANTIME = pd.read_sql(sql, cnxn2)
+        
+        sql = "select * from SVM_PROJECT_MODEL where PROJECT_ID = \'" + str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]) + "\'"
+        SVM_PROJECT_MODEL = pd.read_sql(sql, cnxn2)
+        
+        sql = "select * from SVM_PROJECT_CONFIG where MODEL_ID = \'" + str(SVM_PROJECT_MODEL.MODEL_ID[0]) + "\' and PARAMETER_3RD = \'Y\'"  
+        SVM_PROJECT_CONFIG = pd.read_sql(sql, cnxn2)
+        
+        if len(SVM_PROJECT_CONFIG) == 0:
+            print('config no data')                                                                                                                                
+        else:            
+            LAST_SCANTIME = datetime.datetime.strftime(SVM_PROJECT_ONLINE_SCANTIME.LAST_SCANTIME[0], '%Y-%m-%d %H:%M:%S.%f')[:-3]
+            sql = "select * from " + str(project_id) + r"_PARAMETER_DATA where PARAMETER = '" + str(SVM_PROJECT_CONFIG.PARAM_VALUE[0]) + r"' and ITIME > '" + LAST_SCANTIME + r"'" 
+            SVM_PARAMETER_DATA_y = pd.read_sql(sql, cnxn2)
+            
+            if len(SVM_PARAMETER_DATA_y) == 0:
+                print('SVM_PARAMETER_DATA_y null ns') 
+            else:
+                FILTER_FEATURE = SVM_PROJECT_CONFIG.PARAM_VALUE[0] 
+                sql = "select * from " + str(project_id) + "_RUN where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[0])
+                SVM_PROJECT_RUN = pd.read_sql(sql, cnxn2)
+                        
+                if len(SVM_PROJECT_RUN) != 0:
+                    
+                    index = base_name.rfind("_")
+                    current_p = base_name[index+1:]
+                    
+                    try:
+                        db_p = SVM_PROJECT_RUN[FILTER_FEATURE][0]
+                    except:
+                        db_p = SVM_PROJECT_RUN['FILTER_FEATURE'][0]                   
+                            
+                    if current_p == db_p:
+                 
+                        #cursor1 = cnxn2.cursor()
+                        #cursor1.execute("UPDATE SVM_ONLINE_SCANTIME SET LAST_SCANTIME = ? WHERE PROJECT_ID = ? AND DATATYPE = ?", SVM_PARAMETER_DATA_y.ITIME[0], int(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]), 'Y')
+                        #cnxn2.commit()
+                        update_online_scantime_lastscantime_by_projectid_datatype(SVM_PARAMETER_DATA_y.ITIME[0], SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], 'Y', server_name_1)
+                        
+                        #sql = r"select * from SVM_ONLINE_PARAMETER where PROJECT_ID = '" + str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]) + r"' order by SEQ"
+                        #SVM_ONLINE_PARAMETER = pd.read_sql(sql, cnxn1)
+                        SVM_ONLINE_PARAMETER = select_online_parameter_by_projectid(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0], server_name_1)
+            
+                        for k in range(len(SVM_ONLINE_PARAMETER)):
+                                                  
+                            if str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'TOOLID':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.TOOLID[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'LOTNAME':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.LOTNAME[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FOUPNAME':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FOUPNAME[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'OPID':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.OPID[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'RECIPE':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.RECIPE[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'ABBRID':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.ABBRID[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'PRODUCT':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.PRODUCT[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'MODELNO':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.MODELNO[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'CHAMBER':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.CHAMBER[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SHEETID':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SHEETID[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'SLOTNO':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.SLOTNO[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'POINT':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.POINT[0])],axis=1)
+                            elif str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() == 'FILTER_FEATURE':                           
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PROJECT_RUN.FILTER_FEATURE[0])],axis=1)
+                            else:
+                                #sql = "select * from " + str(project_id) + "_PARAMETER_DATA where RUNINDEX = " + str(SVM_PROJECT_RUN.RUNINDEX[i]) + r" and UPPER(PARAMETER) = '" + str(SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k]).upper() + r"'"
+                                #SVM_PARAMETER_DATA_tmp = pd.read_sql(sql, cnxn2)
+                                SVM_PARAMETER_DATA_tmp = select_projectx_parameter_data_by_runindex_parameter(project_id, SVM_PROJECT_RUN.RUNINDEX[0], SVM_ONLINE_PARAMETER.ONLINE_PARAMETER[k], server_name_1)
+                                SVM_PARAMETER_DATA_part = pd.concat([pd.Series(SVM_ONLINE_PARAMETER.OFFLINE_PARAMETER[k]),pd.Series(SVM_PARAMETER_DATA_tmp.PARAM_VALUE[0])],axis=1)
+                            
+                            if k == 0:
+                                SVM_PARAMETER_DATA = SVM_PARAMETER_DATA_part
+                            else:
+                                SVM_PARAMETER_DATA = pd.concat([SVM_PARAMETER_DATA, SVM_PARAMETER_DATA_part], axis=0, ignore_index=True)
+                            
+                            SVM_PARAMETER_DATA_part = SVM_PARAMETER_DATA_part.iloc[0:0]                                
+                        
+                        #sql = "select * from " + str(project_id) + "_PARAMETER_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[0])
+                        #SVM_PARAMETER_DATA = pd.read_sql(sql, cnxn2)
+                        
+                        if len(SVM_PARAMETER_DATA) == 0:
+                            print('SVM_PARAMETER_DATA null')  #20190619 add inert sql in the future
+                        else:
+                            #df_SVM_PARAMETER_DATA_lite=SVM_PARAMETER_DATA.drop(['RUNINDEX','ITIME'], axis=1)
+                            df_SVM_PARAMETER_DATA_lite_T = SVM_PARAMETER_DATA.T #20190619 行列互轉
+                            headers = df_SVM_PARAMETER_DATA_lite_T.iloc[0] #20190619 first row set header
+                            df_SVM_PARAMETER_DATA_lite_T_H  = pd.DataFrame(df_SVM_PARAMETER_DATA_lite_T.values[1:], columns=headers)
+                                
+                            print("online y phase[ns]")
+                            df_online_X, df_online_y = OnLine_Data_PreProcess(df_SVM_PARAMETER_DATA_lite_T_H, path_dict['3']["3"])
+                            df_YDI_online = OnLine_YDI(df_online_X, df_online_y, path_dict['5']["3"])
+                            """
+                            if SVM_PROJECT_RUN.FILTER_FEATURE[0] is not None:
+                                if SVM_PROJECT_RUN.FILTER_FEATURE[0] == 'Point_ID':
+                                    sql = "select * from SVM_PROJECT_MODEL where MODEL_NAME = \'" + self.base_name + "_POINT_" + SVM_PROJECT_RUN.POINT[0] + r"' AND UPPER(STATUS) = 'ONLINE'"
+                                elif SVM_PROJECT_RUN.FILTER_FEATURE[0] == 'Sheet_ID':
+                                    sql = "select * from SVM_PROJECT_MODEL where MODEL_NAME = \'" + self.base_name + "_SHEET_" + SVM_PROJECT_RUN.SHEETID[0] + r"' AND UPPER(STATUS) = 'ONLINE'"                                
+                                SVM_PROJECT_MODEL = pd.read_sql(sql, cnxn2)
+                            """
+                            try:
+                                SVM_PROJECT_MODEL = select_project_model_by_projectid_status_filterfeature(projectid, "ONLINE", SVM_PROJECT_RUN[FILTER_FEATURE][0], server_name_1)
+                            except:
+                                SVM_PROJECT_MODEL = select_project_model_by_projectid_status_filterfeature(projectid, "ONLINE", SVM_PROJECT_RUN['FILTER_FEATURE'][0], server_name_1)
+                            
+                            if df_YDI_online is not None:
+                                sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[0]) + r" and PARAMETER = 'Interval' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'Interval', df_YDI_online.Interval[0], int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0) 
+                                    cursor1.execute(sql)       
+                                    cnxn2.commit()                                  
+                                else: 
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", df_YDI_online.Interval[0], 0, int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'Interval', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                    cursor1.execute(sql)
+                                    cnxn2.commit()
+                                
+                                sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[0]) + r" and PARAMETER = 'YDI' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'YDI', df_YDI_online.YDI[0], int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0) 
+                                    cursor1.execute(sql)       
+                                    cnxn2.commit()                                             
+                                else: 
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", df_YDI_online.YDI[0], 0, int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'YDI', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                    cursor1.execute(sql)
+                                    cnxn2.commit()
+                                
+                                sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[0]) + r" and PARAMETER = 'YDI_Threshold' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'YDI_Threshold', df_YDI_online.YDI_Threshold[0], int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0) 
+                                    cursor1.execute(sql)       
+                                    cnxn2.commit()                                       
+                                else: 
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", df_YDI_online.YDI_Threshold[0], 0, int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'YDI_Threshold', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                    cursor1.execute(sql)
+                                    cnxn2.commit()
+                                
+                                sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[0]) + r" and PARAMETER = 'Y_avg' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'Y_avg', df_YDI_online.Y_avg[0], int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0) 
+                                    cursor1.execute(sql)       
+                                    cnxn2.commit()                                                  
+                                else: 
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", df_YDI_online.Y_avg[0], 0, int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'Y_avg', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                    cursor1.execute(sql)
+                                    cnxn2.commit()
+                                
+                                sql = "select * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(SVM_PARAMETER_DATA_y.RUNINDEX[0]) + r" and PARAMETER = 'Cluster_idx' and MODEL_ID = " + str(SVM_PROJECT_MODEL.MODEL_ID[0])
+                                SVM_PROJECT_PREDICT_DATA = pd.read_sql(sql, cnxn2)
+                                if len(SVM_PROJECT_PREDICT_DATA) == 0:
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(project_id+"_PREDICT_DATA", int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'Cluster_idx', df_YDI_online.Cluster_idx[0], int(SVM_PROJECT_MODEL.MODEL_ID[0]), 0) 
+                                    cursor1.execute(sql)       
+                                    cnxn2.commit()                                                   
+                                else: 
+                                    cursor1 = cnxn2.cursor()
+                                    sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(project_id+"_PREDICT_DATA", df_YDI_online.Cluster_idx[0], 0, int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 'Cluster_idx', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+                                    cursor1.execute(sql)
+                                    cnxn2.commit()
+                                
+                                if int(df_YDI_online.YDI_Check[0]) == 0:
+                                    sql = "select * from SVM_ONLINE_STATUS where PROJECT_ID = \'" + str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]) + "\' and RUNINDEX = \'" + str(SVM_PARAMETER_DATA_y.RUNINDEX[0]) + "\'"
+                                    SVM_ONLINE_STATUS = pd.read_sql(sql, cnxn2)
+                                    if len(SVM_ONLINE_STATUS) == 0:
+                                        cursor1 = cnxn2.cursor()  
+                                        cursor1.execute("insert into SVM_ONLINE_STATUS(PROJECT_ID, RUNINDEX, YDI_ALARM, ITIME) values (?,?,?,?)", int(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]), int(SVM_PARAMETER_DATA_y.RUNINDEX[0]), 1, datetime.datetime.now())
+                                        cnxn2.commit()                                         
+                                    else:
+                                        cursor1 = cnxn2.cursor()
+                                        cursor1.execute("UPDATE SVM_ONLINE_STATUS SET YDI_ALARM = ? WHERE PROJECT_ID = ? AND RUNINDEX = ?", 1, int(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[0]), int(SVM_PARAMETER_DATA_y.RUNINDEX[0]))
+                                        cnxn2.commit() 
+                                    update_projectx_run_ydialarm_by_runindex(project_id, 1, SVM_PARAMETER_DATA_y.RUNINDEX[0], server_name_1)                                                                                   
+        return None
+    
+    def many_online_y_phase(self, projectid, datatype, retrain_num, batch_num):
+        for feature in self.feature_lists:
+            self.online_y_many_phase(projectid, datatype, base_name=self.filter_dir_name[feature], retrain_num=retrain_num, batch_num=batch_num)
+        return None
+    
+    def many_to_many_online_y(self, projectid, datatype, retrain_num):
+        #self.batch_data = batch_data
+        retrain_num = self.get_max_retrain_num(retrain_num=retrain_num)
+
+        if self.filter_feature is None:
+            self.get_filter_feature()
+
+        if self.feature_lists is None:
+            self.get_feature_content()
+
+        if self.filter_dir_name is None:
+            self.filter_dir_name = {}
+            for feature in self.feature_lists:
+                self.filter_dir_name[feature] = self.base_name + "_" + self.filter_feature + "_" + str(feature)
+        
+        self.get_saved_path_config()
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        self.many_online_y_phase(projectid, datatype, retrain_num=retrain_num, batch_num=batch_num)
+
+        return None
+
+if __name__ == '__main__':        
+    #20190627 online data must go 10.96.18.199, get SERVER_NAME to the server
+    def timer(n):
+        #i = 1
+        while True:
+            #print(i)                  
+            SVM_PROJECT_ONLINE_SCANTIME = select_project_online_scantime_y_many()
+            
+            if len(SVM_PROJECT_ONLINE_SCANTIME) != 0:
+                
+                for a in range(len(SVM_PROJECT_ONLINE_SCANTIME)):
+                
+                    projectid = SVM_PROJECT_ONLINE_SCANTIME.PROJECT_ID[a]
+                    SVM_MODEL_ONLINE_Y_MANY = select_project_model_by_projectid_status(projectid, "ONLINE")
+                    
+                    if len(SVM_MODEL_ONLINE_Y_MANY) != 0:
+                        
+                        SVM = SuperVM(str(SVM_PROJECT_ONLINE_SCANTIME.PROJECT_NAME[a]), str(SVM_PROJECT_ONLINE_SCANTIME.UPLOAD_FILE[a]), r"Config.json")                
+                        datatype = SVM_PROJECT_ONLINE_SCANTIME.DATATYPE[a].upper()
+                        retrain_num = int(SVM_MODEL_ONLINE_Y_MANY.MODEL_SEQ[0]) 
+                        SVM.many_to_many_online_y(projectid, datatype, retrain_num)   
+                    
+                    else:
+                        print("SVM_MODEL_ONLINE_Y_MANY None")                      
+            #i = i+1                 
+            time.sleep(n)
+    timer(5) 
+
+#-----------------------------------------------------------------------------------------
+#SmartVM_Constructor_retrain.py
+from Data_Preview import Data_Preview
+from Data_PreProcess import Data_PreProcess_Train, Data_PreProcess_Test, OnLine_Data_PreProcess
+from XDI import XDI_off_line_report, Build_XDI_Model, OnLine_XDI
+from YDI import YDI_off_line_report, Build_YDI_Model, OnLine_YDI
+from MXCI_MYCI_pre import pre_MXCI_MYCI
+from MXCI_MYCI import MXCI_MYCI_offline, CI_online
+from Model_Selection import Model_Selection
+from XGB_model import xgb_tuning, xgb_build, xgb_predict, xgb_merge_tuning, xgb_merge_predict, xgb_batch_predict, xgb_online_predict
+from PLS_model import pls_build, pls_predict, pls_merge_predict, pls_batch_predict, pls_online_predict_x
+from Read_path import read_path
+from config import read_config, save_config
+from CreateLog import WriteLog
+from DB_operation import DB_Connection, select_project_model_by_modelid, select_project_model_by_modelname_status, update_project_model_modelstatus_by_modelid, update_project_model_retrainstarttime_by_modelid, update_project_model_modelstatus_modelstep_waitconfirm_by_modelid, update_project_model_mae_mape_by_modelid
+
+import os
+import json
+import traceback
+from Path import All_path
+from Data_Collector import Data_Collector
+# from Data_Check import Data_Check
+from Exclusion import DataRemove, FeatureExclude
+
+from shutil import copyfile
+import numpy as np
+import pandas as pd
+import pyodbc
+import datetime
+import time
+from json2csv import json2csv
+
+
+class SuperVM():
+    def __init__(self, sorce_dir, train_data_name, config_file_name, batch_data_name_list=None):
+        self.base_path = os.path.join("../Cases/", sorce_dir)
+        self.base_name = os.path.basename(os.path.abspath(self.base_path))
+        self.train_data_name = train_data_name
+        self.train_base, self.ext = os.path.splitext(self.train_data_name)
+        self.train_data = os.path.join(self.base_path, train_data_name)
+        self.config_file = os.path.join(self.base_path, config_file_name)
+        if batch_data_name_list:
+            self.batch_data = [os.path.join(self.base_path, x) for x in batch_data_name_list]
+        self.in_path = os.path.join(self.base_path, "path_config.json")
+        self.mdoel_dict = {}
+        self.mdoel_dict["3"] = {}
+        self.mdoel_dict["3"]["Train"] = Data_PreProcess_Train
+        self.mdoel_dict["3"]["Test"] = Data_PreProcess_Test       
+        self.mdoel_dict["4"] = {}
+        self.mdoel_dict["4"]["Train"] = Build_XDI_Model
+        self.mdoel_dict["4"]["Test"] = XDI_off_line_report
+        self.mdoel_dict["5"] = {}
+        self.mdoel_dict["5"]["Train"] = Build_YDI_Model
+        self.mdoel_dict["5"]["Test"] = YDI_off_line_report
+        self.mdoel_dict["8"] = {}
+        self.mdoel_dict["8"]["Train"] = pre_MXCI_MYCI
+        self.mdoel_dict["8"]["Test"] = MXCI_MYCI_offline
+
+        self.retrain_data = os.path.join(self.base_path, "retrain_data.csv")
+        if not os.path.exists(self.retrain_data):
+            copyfile(self.train_data, self.retrain_data)
+
+        # Other Variables initialized in methods
+        self.filter_feature = None
+        self.feature_lists = None
+        self.current_retrain_number = None
+        self.current_batch_number = None
+        self.path_config = None
+        self.filter_feature_dict = None
+        # self.filter_dir_path = None
+        self.filter_dir_name = None
+
+    def get_filter_feature(self):
+        try:
+            with open(self.config_file) as json_data:
+                config = json.load(json_data)
+        except Exception as e:
+            config = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading config file\n")
+                file.write(traceback.format_exc(e))
+                raise FileNotFoundError
+        self.filter_feature = config["Filter_Feature"]
+        
+        #20190626 remove
+        self.model_pred_name = config["Model_Pred_Name"]
+        #self.model_pred_name = ["XGB", "PLS"]
+        return None
+
+    def get_feature_content(self, split_flag=None):
+        try:
+            training_data = pd.read_csv(self.train_data)
+        except Exception as e:
+            training_data = None
+            error_path = os.path.join(self.base_path, "error.log")
+            with open(error_path, 'a') as file:
+                file.write("Error while reading raw data\n")
+                file.write(str(e) + "\n")
+                file.write(traceback.format_exc())
+                raise FileNotFoundError
+        self.feature_lists = training_data[self.filter_feature].unique().tolist()
+        self.feature_lists.sort()
+        if split_flag is not None:
+            self.filter_feature_dict = {}
+            for feature_list in self.feature_lists:
+                tmp_data = training_data[training_data[self.filter_feature] == feature_list].copy().reset_index(drop=True)
+                self.filter_feature_dict[feature_list] = \
+                    os.path.join(self.base_path, self.train_base + "_" + self.filter_feature + "_" + str(feature_list) + self.ext)
+                tmp_data.to_csv(self.filter_feature_dict[feature_list], index=False)
+        return None
+
+########################################################################################################################
+    def create_path(self, filter_path, path_config=None, batch_flag=None, retrain_folder_path=None, training_data=None):
+        if not os.path.exists(filter_path):
+            os.makedirs(filter_path)
+        #######
+        if os.path.exists(self.in_path):
+            self.get_saved_path_config()
+            path_config = self.path_config
+        #######
+        path = All_path(filter_path, self.config_file, path_config)
+        if batch_flag is None:
+            if training_data is None:
+                training_data = self.train_data
+            path.init_train(training_data=training_data)
+            path.init_merge()
+            self.current_retrain_number = path.get_current_retrain_number()
+        else:
+            path.init_batch(self.batch_data, retrain_folder_path)
+            self.current_batch_number = path.get_current_batch_number(retrain_folder_path)
+        return path.get_path_config()
+
+    def save_path_config(self):
+        with open(self.in_path, 'w') as fp:
+            json.dump(self.path_config, fp, indent=4, sort_keys=True)
+        return None
+
+    def create_many_path(self, batch_flag=None, training_data_dict=None):
+        if batch_flag is None:
+            self.path_config = None
+        # self.filter_dir_path = {}
+        self.filter_dir_name = {}
+        for feature_list in self.feature_lists:
+            if training_data_dict is None:
+                training_data = self.train_data
+            else:
+                training_data = training_data_dict[feature_list]
+
+            # self.filter_dir_path[feature_list] = \
+            #     os.path.join(self.base_path, self.base_name + "_" + self.filter_feature + "_" + str(feature_list))
+            self.filter_dir_name[feature_list] = self.base_name + "_" + self.filter_feature + "_" + str(feature_list)
+            filter_dir_path = os.path.join(self.base_path, self.filter_dir_name[feature_list])
+            self.path_config = self.create_path(filter_dir_path, self.path_config,
+                                                training_data=training_data)
+            if training_data_dict is not None:
+                os.remove(training_data)
+            self.save_path_config() #20190715 retrain mode please save in for loop end, avoid not archived
+        return None
+
+    def get_saved_path_config(self):
+        #20190722 avoid open same path_config
+        def timer(n):
+            while True:                
+                try:
+                    with open(self.in_path) as json_data:
+                        self.path_config = json.load(json_data)
+                except Exception as e:
+                    print("someone open path_config, please wait 5s")
+                    timer.sleep(n)
+                    """
+                    error_path = os.path.join(self.base_path, "error.log")
+                    with open(error_path, 'a') as file:
+                        file.write("Error while reading path_config.json")
+                        file.write(traceback.format_exc(e))
+                    raise FileNotFoundError
+                    """
+                else:
+                    break
+        timer(5)
+        return None
+########################################################################################################################
+    def get_max_retrain_num(self, retrain_num=None):
+        if retrain_num is None:
+            try:
+                first_key = list(self.path_config.keys())[0]
+                key_list = list(self.path_config[first_key].keys())
+                key_list.remove("main")
+                return max([int(x) for x in key_list])
+            except:
+                try:
+                    self.get_saved_path_config()
+                    first_key = list(self.path_config.keys())[0]
+                    key_list = list(self.path_config[first_key].keys())
+                    key_list.remove("main")
+                    return max([int(x) for x in key_list])
+                except Exception as e:
+                    raise FileNotFoundError("path_config not found")
+        else:
+            return retrain_num
+
+    def get_max_batch_num(self, retrain_num, batch_num=None):
+        if batch_num is None:
+            first_key = list(self.path_config.keys())[0]
+            key_list = list(self.path_config[first_key][str(retrain_num)].keys())
+            key_list.remove("main")
+            return max([int(x) for x in key_list])
+        else:
+            return batch_num
+
+    def model(self, path_dict, merge_flag=None):
+        if merge_flag is None:
+            base_num = 0
+            xgb_tuning(path_dict['6']["XGB"][str(base_num)])
+            xgb_build(path_dict['6']["XGB"][str(base_num+1)])
+            xgb_predict(path_dict['6']["XGB"][str(base_num+2)])
+            
+            #20190626 temporarily mark
+            pls_build(path_dict['6']["PLS"][str(base_num+1)])
+            pls_predict(path_dict['6']["PLS"][str(base_num+2)])
+            
+            input_path = read_path(path_dict['6']["PLS"][str(base_num+2)])
+            mylog = WriteLog(input_path["log_path"], input_path["error_path"])     
+            config = read_config(input_path["config_path"], mylog)
+            
+            x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+            x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+            delcol = config["IDX"] 
+            pls_y_name = config["Y"][0]+"_pred_PLS"
+            
+            train=pd.read_csv(x_Trainpath)
+            test=pd.read_csv(x_Testpath)
+            sheet_train = train[delcol]
+            sheet_test = test[delcol]
+            
+            pls_predict_train_path = os.path.join(path_dict['6']["PLS"][str(base_num+2)], "trainPredResult.csv")
+            pls_predict_test_path = os.path.join(path_dict['6']["PLS"][str(base_num+2)], "testPredResult.csv")
+            
+            xgb_predict_train_path = os.path.join(path_dict['6']["XGB"][str(base_num+2)], "trainPredResult.csv")
+            xgb_predict_test_path = os.path.join(path_dict['6']["XGB"][str(base_num+2)], "testPredResult.csv")
+            
+            #20190626 temporarily mark
+            pls_train=pd.read_csv(pls_predict_train_path)
+            pls_test=pd.read_csv(pls_predict_test_path)
+            #pls_train=pd.read_csv(xgb_predict_train_path)
+            #pls_test=pd.read_csv(xgb_predict_test_path)            
+            #pls_train['Value_pred_XGB'] = pls_train['Value_pred_XGB']*1.2
+            #pls_test['Value_pred_XGB'] = pls_test['Value_pred_XGB']*1.2
+            
+            #20190626 temporarily mark
+            pls_train.rename({'Y_pred': pls_y_name}, axis=1, inplace=True)
+            pls_test.rename({'Y_pred': pls_y_name}, axis=1, inplace=True)
+            #pls_train.rename({'Value_pred_XGB': 'Value_pred_PLS'}, axis=1, inplace=True)
+            #pls_test.rename({'Value_pred_XGB': 'Value_pred_PLS'}, axis=1, inplace=True)
+            
+            #20190626 temporarily mark
+            output_train = pd.concat([sheet_train,pls_train],axis=1)
+            output_test = pd.concat([sheet_test,pls_test],axis=1)
+            output_train.to_csv(pls_predict_train_path, index=False) 
+            output_test.to_csv(pls_predict_test_path, index=False) 
+            #pls_train.to_csv(pls_predict_train_path, index=False) 
+            #pls_test.to_csv(pls_predict_test_path, index=False) 
+        else:
+            base_num = 3
+            xgb_merge_tuning(path_dict['6']["XGB"][str(base_num)])
+            xgb_build(path_dict['6']["XGB"][str(base_num+1)])
+            xgb_merge_predict(path_dict['6']["XGB"][str(base_num+2)])
+            
+            #20190626 temporarily mark
+            pls_build(path_dict['6']["PLS"][str(base_num+1)])
+            pls_merge_predict(path_dict['6']["PLS"][str(base_num+2)])
+            
+            input_path = read_path(path_dict['6']["PLS"][str(base_num+2)])
+            mylog = WriteLog(input_path["log_path"], input_path["error_path"])   
+            config = read_config(input_path["config_path"], mylog)
+            
+            x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+            delcol = config["IDX"] 
+            pls_y_name = config["Y"][0]+"_pred_PLS"
+            
+            train=pd.read_csv(x_Trainpath)
+            sheet_train = train[delcol]
+            
+            pls_predict_train_path = os.path.join(path_dict['6']["PLS"][str(base_num+2)], "trainPredResult.csv")
+            xgb_predict_train_path = os.path.join(path_dict['6']["XGB"][str(base_num+2)], "trainPredResult.csv")
+            
+            #20190626 temporarily mark
+            pls_train=pd.read_csv(pls_predict_train_path)
+            #pls_train=pd.read_csv(xgb_predict_train_path)
+            #pls_train['Value_pred_XGB'] = pls_train['Value_pred_XGB']*1.2
+            
+            #20190626 temporarily mark
+            pls_train.rename({'Y_pred': pls_y_name}, axis=1, inplace=True)
+            #pls_train.rename({'Value_pred_XGB': 'Value_pred_PLS'}, axis=1, inplace=True)
+            
+            #20190626 temporarily mark
+            output_train = pd.concat([sheet_train,pls_train],axis=1)
+            output_train.to_csv(pls_predict_train_path, index=False)   
+            #pls_train.to_csv(pls_predict_train_path, index=False)
+    
+    def retrain_phase(self, modelid, base_name, retrain_num, batch_num=None):
+        retrain_num = self.get_max_retrain_num(retrain_num)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+        path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+
+        print("RETRAIN phase")
+        merge_flag = '2'
+        test_flag = '3'
+        
+        server_name = "10.96.18.199"
+        db_name = "APC"
+        user = "YL"
+        password = "YL$212"
+        cnxn2 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+        
+        cursor1 = cnxn2.cursor()
+        cursor1.execute("UPDATE SVM_PROJECT_MODEL SET RETRAIN_START_TIME = ? WHERE MODEL_ID = ?", datetime.datetime.now(), int(modelid))
+        cnxn2.commit()
+        
+        Data_PreProcess_Train(path_dict['3'][merge_flag], merge_flag=True)
+        Build_XDI_Model(path_dict['4'][merge_flag])
+        XDI_off_line_report(path_dict['4'][test_flag], mode="Merge")
+        Build_YDI_Model(path_dict['5'][merge_flag])
+        YDI_off_line_report(path_dict['5'][test_flag], mode="Merge")
+        self.model(path_dict, merge_flag=True)
+        msg_Model, win = Model_Selection(path_dict['7']['1'], mode="Merge")
+        #20190717 retrain must save mae/mape to db, read train data
+        output_paths = {}
+        if str(win).upper() == 'XGB':           
+            output_paths["Model_Selection_Report"] = os.path.join(path_dict['7']['1'], "Model_Selection_Report.csv")
+            select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+            out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Train')]           
+            update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], modelid)
+        elif str(win).upper() == 'PLS':
+            output_paths["Model_Selection_Report"] = os.path.join(path_dict['7']['1'], "Model_Selection_Report.csv")
+            select_df = pd.read_csv(output_paths["Model_Selection_Report"])           
+            out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Train')]            
+            update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], modelid)
+            
+        pre_MXCI_MYCI(path_dict['8'][merge_flag])
+        MXCI_MYCI_offline(path_dict['8'][test_flag],  mode="Merge")
+        
+        cursor1 = cnxn2.cursor()
+        cursor1.execute("UPDATE SVM_PROJECT_MODEL SET RETRAIN_END_TIME = ?, RETRAIN_RESULT = ? WHERE MODEL_ID = ?", datetime.datetime.now(), 'OK', int(modelid))
+        cnxn2.commit()
+
+        return None
+    
+    def retrain_many_phase(self, base_name, retrain_num, batch_num=None):
+        retrain_num = self.get_max_retrain_num(retrain_num)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=batch_num)
+        path_dict = self.path_config[base_name][str(retrain_num)][str(batch_num)]
+
+        print("RETRAIN many phase")
+        merge_flag = '2'
+        test_flag = '3'
+        
+        #base_name = MODEL_NAME(m2m)       
+        server_name = "10.96.18.199"
+        db_name = "APC"
+        user = "YL"
+        password = "YL$212"
+        cnxn2 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+        
+        SVM_PROJECT_MODEL = select_project_model_by_modelname_status(base_name, "RETRAIN")
+        
+        update_project_model_retrainstarttime_by_modelid(datetime.datetime.now(), SVM_PROJECT_MODEL.MODEL_ID[0])
+
+        Data_PreProcess_Train(path_dict['3'][merge_flag], merge_flag=True)
+        Build_XDI_Model(path_dict['4'][merge_flag])
+        XDI_off_line_report(path_dict['4'][test_flag], mode="Merge")
+        Build_YDI_Model(path_dict['5'][merge_flag])
+        YDI_off_line_report(path_dict['5'][test_flag], mode="Merge")
+        self.model(path_dict, merge_flag=True)
+        msg_Model, win = Model_Selection(path_dict['7']['1'], mode="Merge")
+        
+        output_paths = {}
+        if str(win).upper() == 'XGB':           
+            output_paths["Model_Selection_Report"] = os.path.join(path_dict['7']['1'], "Model_Selection_Report.csv")
+            select_df = pd.read_csv(output_paths["Model_Selection_Report"])
+			# 2019079 change Test to train By Peter Lin
+            out_df = select_df[(select_df["Model"] == 'XGB') & (select_df["Data"] == 'Train')]            
+            update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PROJECT_MODEL.MODEL_ID[0])
+        elif str(win).upper() == 'PLS':
+            output_paths["Model_Selection_Report"] = os.path.join(path_dict['7']['1'], "Model_Selection_Report.csv")
+            select_df = pd.read_csv(output_paths["Model_Selection_Report"])
+			# 2019079 change Test to train By Peter Lin			
+            out_df = select_df[(select_df["Model"] == 'PLS') & (select_df["Data"] == 'Train')]            
+            update_project_model_mae_mape_by_modelid(out_df["MAE"], out_df["MAPE"], SVM_PROJECT_MODEL.MODEL_ID[0])
+            
+        pre_MXCI_MYCI(path_dict['8'][merge_flag])
+        MXCI_MYCI_offline(path_dict['8'][test_flag],  mode="Merge")
+        
+        cursor1 = cnxn2.cursor()
+        cursor1.execute("UPDATE SVM_PROJECT_MODEL SET RETRAIN_END_TIME = ?, RETRAIN_RESULT = ? WHERE MODEL_ID = ?", datetime.datetime.now(), 'OK', int(SVM_PROJECT_MODEL.MODEL_ID[0]))
+        cnxn2.commit()
+
+        return None
+    
+    def many_retrain_phase(self, retrain_num, batch_num):
+        for feature in self.feature_lists:
+            self.retrain_many_phase(base_name=self.filter_dir_name[feature], retrain_num=retrain_num, batch_num=batch_num)
+        return None
+        
+    def many_data_porter(self, retrain_num, batch_num, mode):
+        dc = Data_Collector(self.base_path, self.train_data, self.config_file)
+        dc.init_collector_dir(retrain_num, batch_num)
+        for feature in self.feature_lists:
+            dc.data_porter(path_config=self.path_config, base_name=self.filter_dir_name[feature],
+                           retrain_num=retrain_num, batch_num=batch_num, mode=mode,
+                           feature_name=self.filter_feature, feature=feature)
+        dc.data_organize(retrain_num, batch_num, mode,
+                         feature_name=self.filter_feature, feature_lists=self.feature_lists)
+        return None        
+
+    def one_to_all_retrain(self, modelid):
+        path = os.path.join(self.base_path, self.base_name)
+        dc = Data_Collector(self.base_path, self.train_data, self.config_file)
+        self.path_config = self.create_path(path)
+        self.save_path_config()
+
+        retrain_num = self.get_max_retrain_num(retrain_num=self.current_retrain_number)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+        dc.init_collector_dir(retrain_num, batch_num)
+        self.retrain_phase(modelid, base_name=self.base_name, retrain_num=retrain_num)
+        dc.data_porter(path_config=self.path_config, base_name=self.base_name,
+                       retrain_num=retrain_num, batch_num=batch_num, mode="Merge")
+        return None
+
+
+    def many_to_many_retrain(self):
+        dc = Data_Collector(self.base_path, self.train_data, self.config_file)
+
+        self.get_filter_feature()
+        self.get_feature_content(split_flag=True)
+        self.create_many_path(training_data_dict=self.filter_feature_dict)
+
+        retrain_num = self.get_max_retrain_num(retrain_num=self.current_retrain_number)
+        batch_num = self.get_max_batch_num(retrain_num=retrain_num, batch_num=None)
+        dc.init_collector_dir(retrain_num, batch_num)
+        print("We're at retrain_num=" + str(retrain_num) + " and batch_num=" + str(batch_num))
+
+        self.many_retrain_phase(retrain_num=retrain_num, batch_num=batch_num)
+        self.many_data_porter(retrain_num=retrain_num, batch_num=batch_num, mode="Merge")  
+
+if __name__ == '__main__':
+    def timer(n):
+        #i = 1
+        while True:
+            #print(i)            
+            server_name = "10.96.18.199"
+            db_name = "APC"
+            user = "YL"
+            password = "YL$212"        
+            cnxn1 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
+            
+            sql = r"select * from SVM_PROJECT A, SVM_PROJECT_MODEL B where A.PROJECT_ID = B.PROJECT_ID AND UPPER(A.STATUS) = 'RETRAIN' AND UPPER(B.STATUS) = 'RETRAIN' AND RETRAIN_START_TIME is null"
+            SVM_PP_MODEL = pd.read_sql(sql, cnxn1)  
+            
+            if len(SVM_PP_MODEL) != 0:
+                
+                SVM = SuperVM(str(SVM_PP_MODEL.PROJECT_NAME[0]), str(SVM_PP_MODEL.UPLOAD_FILE[0]), r"Config.json")
+                modelid = SVM_PP_MODEL.MODEL_ID[0]
+                
+                if (str(SVM_PP_MODEL.MODEL_TYPE[0]) == '1') or (str(SVM_PP_MODEL.MODEL_TYPE[0]) == '2'):
+                    
+                    SVM.one_to_all_retrain(modelid)                                    
+                
+                elif str(SVM_PP_MODEL.MODEL_TYPE[0]) == '3':
+
+                    SVM.many_to_many_retrain()           
+            #i = i+1                    
+            time.sleep(n)
+    timer(10)    
+    
+#-------------------------------------------------------------
+#XDI.py
+import numpy as np
+from sklearn.decomposition import PCA
+from sklearn import preprocessing
+import matplotlib.pyplot as plt
+from sklearn.externals import joblib
+import  os
+from config import read_config, save_config
+import pandas as pd
+from Read_path import read_path
+from CreateLog import WriteLog
+plt.style.use('ggplot')
+plt.ioff()
+
+def XDI_prepare(folder_paths, Mode):
+    ###
+
+    input_paths = read_path(folder_paths)
+    mylogs = WriteLog(input_paths["log_path"], input_paths["error_path"])
+    configs = read_config(input_paths["config_path"], mylogs)
+
+    if Mode in ["OnLine"]:
+        return input_paths, mylogs, configs
+
+    output_paths = {}
+    if Mode in ["Train"]:
+        output_paths["XDI_PCA_path"] = os.path.join(folder_paths, "XDI_PCA.pkl")
+        output_paths["XDI_DataTrans_path"] = os.path.join(folder_paths, "XDI_DataTrans.pkl")
+        output_paths["XDI_PreWork_DataTrans_path"] = os.path.join(folder_paths, "XDI_PreWork_DataTrans.pkl")
+
+    if Mode in ["Test"]:
+        output_paths["XDI_offline_path"] = os.path.join(folder_paths, "XDI_offline.csv")
+        output_paths["XDI_alarm_report_path"] = os.path.join(folder_paths, "XDI_Alarm_Report/")
+        output_paths["XDI_offline_pic_path"] = os.path.join(folder_paths, "XDI.png")
+        path_ = output_paths["XDI_alarm_report_path"]
+        if not os.path.exists(path_):
+            os.makedirs(path_)
+
+    return input_paths, output_paths, mylogs, configs
+
+
+def read_data(data_path_, mylog_):
+    try:
+        data_ = pd.read_csv(data_path_)
+    except Exception as e:
+        mylog_.error("XDI: Read Raw Data ERROR.")
+        mylog_.error_trace(e)
+        raise FileNotFoundError
+    return data_
+
+def XDI_Pre_Process(data_paths, index_cols, mylogs):
+
+    data = read_data(data_paths, mylogs)
+    df_idx = data[index_cols]
+
+    for col in index_cols:
+        try:
+            data = data.drop(col, axis=1)
+        except Exception as e:
+            msg = "XYDI(Pre-process): There is no col named" + str(col) + "already."
+            mylogs.warning(msg)
+            mylogs.warning_trace(e)
+
+    return data, df_idx
+
+
+def XDI_PreWork_Train(data_path, configs, XDI_PreWork_DataTrans_paths, mylogs):
+
+    data, df_idx = XDI_Pre_Process(data_path, configs["IDX"], mylogs)
+    print("Pre-work")
+    print(type(data))
+
+    # check if Data Transform was executed in Data Pre-Process
+    if "DataTrans" not in configs["Data_Preprocess_Steps"]:
+        configs["XDI"]["Data_Transform_Check"] = 0
+        scaler_raw_Z_score = preprocessing.StandardScaler().fit(data)
+        col_ = data.columns
+        data = scaler_raw_Z_score.transform(data)
+        data = pd.DataFrame(data=data, columns=col_)
+        joblib.dump(scaler_raw_Z_score, XDI_PreWork_DataTrans_paths)
+        print("Pre-work")
+        print(type(data))
+        return data, configs
+
+    elif "DataTrans" in configs["Data_Preprocess_Steps"]:
+        configs["XDI"]["Data_Transform_Check"] = 1
+        return data, configs
+
+
+def XDI_PreWork_Test(data_paths, input_paths, index_cols, check_prework_DataTrans, mylogs):
+
+    data, df_idx = XDI_Pre_Process(data_paths, index_cols, mylogs)
+    print("Pre-work Test")
+    print(type(data))
+    if check_prework_DataTrans == 0:
+        module_transform_ = joblib.load(input_paths["XDI_PreWork_DataTrans_path"])
+        col_ = data.columns
+        data = module_transform_.transform(data)
+        data = pd.DataFrame(data=data, columns=col_)
+
+    raw_data = data.copy()
+
+    module_PCA_ = joblib.load(input_paths["XDI_PCA_path"])
+    data = module_PCA_.transform(data)
+
+    scaler_pca_Z_score_ = joblib.load(input_paths["XDI_DataTrans_path"])
+    data = scaler_pca_Z_score_.transform(data)
+
+    return raw_data, data, df_idx
+
+
+def XDI_judger(XDI_value, threshold):
+    if XDI_value <= threshold:
+        return "OK"
+    elif XDI_value > threshold:
+        return "NG"
+
+
+def XDI_threshold_calculator(df_, XDI_threshold, pca_threshold):
+    XDI_loo = []
+    for idx in range(df_.shape[0]):
+        # loo PCA
+        Model_pca_loo = PCA(n_components=pca_threshold).fit(df_.drop(idx, axis=0))
+        X_train_loo = Model_pca_loo.transform(df_.drop(idx, axis=0))
+        X_loo = Model_pca_loo.transform(np.array(df_.iloc[idx]).reshape(1,-1))
+
+        # loo Z
+        Model_z_loo = preprocessing.StandardScaler().fit(X_train_loo)
+        X_loo = Model_z_loo.transform(X_loo)
+
+        # calculate XDI loo
+        X_loo_XDI = np.sqrt(np.sum(X_loo * X_loo))
+        XDI_loo.append(X_loo_XDI)
+
+    XDI_loo = np.array(XDI_loo)
+    XDI_loo = np.sort(XDI_loo)[int(len(XDI_loo) * 0.05):int(len(XDI_loo) * 0.95)]
+    XDI_threshold = np.mean(XDI_loo) + np.std(XDI_loo) * np.sqrt(1 / XDI_threshold)
+
+    return XDI_threshold
+
+
+def XDI_Alarm_report(data_trians, data_tests, XDI_tables, idx_cols, output_paths, mylogs):
+    data_all = pd.concat([data_trians, data_tests], axis=0, ignore_index=True)
+    NG_idx = XDI_tables.loc[XDI_tables["Result"] == "NG"].index
+    for i in NG_idx:
+        mark = XDI_tables["Type"].iloc[i]
+        base_data = data_trians.copy()
+        if mark == "Train":
+            base_data = base_data.drop(i, axis=0)
+        target_data = data_all.iloc[i]
+
+        contribution_table = base_data.mean()-target_data
+        contribution_table = contribution_table.abs().sort_values(ascending=False)
+
+        msg = "\t".join([str(col) + ": " + str(XDI_tables[col].iloc[i]) for col in idx_cols])
+        mylogs.warning("XDI Alarm\tIndex:\t" + msg)
+
+        filename_change_part = "_".join([str(col) + "_" + str(XDI_tables[col].iloc[i]) for col in idx_cols])
+
+        filename = "_".join(["Contribution", filename_change_part, ".csv"])
+
+        output_path_ = os.path.join(output_paths["XDI_alarm_report_path"], filename)
+
+        df_contri = pd.DataFrame({"Col_Name": contribution_table.index,
+                                  "Contribution": contribution_table.values})
+
+        # Index_Columns Output: One to one
+        # for col in idx_cols:
+        #     df_contri[col] = XDI_tables[col].iloc[i]
+
+        # Index_Columns Output: All in one
+        # idx_col_name = "_".join(idx_cols)
+        idx_col_values_list = []
+
+        for col in idx_cols:
+            idx_col_values_list.append(str(XDI_tables[col].iloc[i]))
+
+        # idx_col_values = "_".join(idx_col_values_list)
+        df_contri["Index_Columns"] = "_".join(idx_col_values_list)
+
+        df_contri.to_csv(output_path_, index=False)
+
+        filename = "_".join(["Contribution_top_20", filename_change_part, ".png"])
+        output_path_ = os.path.join(output_paths["XDI_alarm_report_path"], filename)
+
+        if df_contri.shape[0] < 20:
+            contri_amount = df_contri.shape[0]
+        elif df_contri.shape[0] >= 20:
+            contri_amount = 20
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        plt.barh(range(contri_amount, 0, -1), df_contri["Contribution"].iloc[:contri_amount])
+        plt.yticks(range(contri_amount, 0, -1), df_contri["Col_Name"].iloc[:contri_amount])
+        ax.set_title("Top 20 Contribution")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_path_)
+        plt.clf()
+    return None
+
+
+def XDI_off_line_report(data_folder, mode):
+    input_path, output_path, mylog, config = XDI_prepare(data_folder, Mode="Test")
+
+    mylog.info("XDI\tOffline Report Start")
+    if mode in ["Train", "Merge"]:
+        df_raw_train, X_train, df_train_idx = XDI_PreWork_Test(input_path["x_train_path"],
+                                                               input_path,
+                                                               config["IDX"],
+                                                               config["XDI"]["Data_Transform_Check"],
+                                                               mylog)
+    elif mode in ["Batch"]:
+        df_raw_train, X_train, df_train_idx = XDI_PreWork_Test(input_path["x_train_path"],
+                                                               input_path,
+                                                               config["IDX"],
+                                                               config["XDI"]["Data_Transform_Check"],
+                                                               mylog)
+    else:
+        raise KeyError("Key: mode is Error: only Train, Merge, Batch")
+
+    if mode in ["Train", "Batch"]:
+        df_raw_test, X_test, df_test_idx = XDI_PreWork_Test(input_path["x_test_path"],
+                                                            input_path,
+                                                            config["IDX"],
+                                                            config["XDI"]["Data_Transform_Check"],
+                                                            mylog)
+
+        X_data = np.concatenate((X_train, X_test), axis=0)
+        df_XDI = pd.concat([df_train_idx, df_test_idx], axis=0, ignore_index=True)
+        X_XDI = [np.sqrt(sum(i)) for i in X_data * X_data]
+        df_XDI['XDI'] = X_XDI
+        df_XDI["Result"] = np.vectorize(XDI_judger)(df_XDI['XDI'], config["XDI"]["XDI_Threshold"])
+        df_XDI["Type"] = ["Train"] * X_train.shape[0] + ["Test"] * X_test.shape[0]
+
+    elif mode in ["Merge"]:
+        df_raw_test = pd.DataFrame(columns=df_raw_train.columns)
+
+        X_data = X_train
+        df_XDI = df_train_idx
+        X_XDI = [np.sqrt(sum(i)) for i in X_data * X_data]
+        df_XDI['XDI'] = X_XDI
+        df_XDI["Result"] = np.vectorize(XDI_judger)(df_XDI['XDI'], config["XDI"]["XDI_Threshold"])
+        df_XDI["Type"] = ["Train"] * X_train.shape[0]
+
+
+    else:
+        raise KeyError("Key: mode is Error: only Train, Merge, Batch")
+
+    msg_XDI = "OK"
+    if "NG" in df_XDI["Result"].values:
+        XDI_Alarm_report(df_raw_train, df_raw_test, df_XDI, config["Index_Columns"], output_path, mylog)
+        msg_XDI = "NG"
+
+    df_XDI["Index_Columns"] = df_XDI[config["Index_Columns"]].apply(lambda x: '_'.join(str(e) for e in x), axis=1)
+    if config["Filter_Feature"] is not None:
+        df_XDI["Filter_Feature"] = df_XDI[config["Filter_Feature"]]
+    else:
+        df_XDI["Filter_Feature"] = df_XDI[config["Index_Columns"]].apply(lambda x: '_'.join(str(e) for e in x), axis=1)
+
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    plt.plot(X_XDI, label='XDI',  c='b')
+    if df_XDI["Result"].isin(["NG"]).any():
+        idx = df_XDI["Result"].loc[df_XDI["Result"] == "NG"].index
+        plt.scatter(idx, df_XDI["XDI"].iloc[idx], c="r", label="NG")
+    ax.axhline(y=config["XDI"]["XDI_Threshold"], c='r', label='XDI threshold')
+    ax.axvline(x=X_train.shape[0], c='g', label='Train/Test Split Line')
+    ax.set_title("XDI")
+    plt.legend()
+    plt.savefig(output_path["XDI_offline_pic_path"])
+    plt.clf()
+
+    # df_XDI["Index_Columns"] = df_XDI[config["Index_Columns"]].apply(lambda x: '_'.join(str(e) for e in x), axis=1)
+    # if config["Filter_Feature"] is not None:
+    #     df_XDI["Filter_Feature"] = df_XDI[config["Filter_Feature"]]
+    df_XDI.to_csv(output_path["XDI_offline_path"], index=False)
+    
+
+    mylog.info("XDI\tOffline Report is stored at: " + output_path["XDI_offline_path"])
+    mylog.info("XDI\tOffline Report Finished")
+
+    return msg_XDI
+
+
+def Build_XDI_Model(data_folder):
+    input_path, output_path, mylog, config = XDI_prepare(data_folder, Mode="Train")
+    mylog.info("XDI\tModel Building Start")
+
+    X_train, config = XDI_PreWork_Train(input_path["x_train_path"],
+                                        config,
+                                        output_path["XDI_PreWork_DataTrans_path"],
+                                        mylog)
+
+    setting_XDI_threshold = config["XDI"]["XDI_threshold_ratio"]
+    setting_pca_threshold = config["XDI"]["filter_pca_threshold"]
+    mylog.info("XDI\tThreshold Calculate Start")
+    config["XDI"]["XDI_Threshold"] = XDI_threshold_calculator(X_train, setting_XDI_threshold, setting_pca_threshold)
+    mylog.info("XDI\tThreshold: " + str(config["XDI"]["XDI_Threshold"]))
+    mylog.info("XDI\tThreshold Calculate Finished")
+    # mylog.info("----------LOO End--------------")
+
+    # PCA Module
+    module_PCA = PCA(n_components=setting_pca_threshold).fit(X_train)
+    X_train_pca = module_PCA.transform(X_train)
+    joblib.dump(module_PCA, output_path["XDI_PCA_path"])
+
+    # PCA again after PCA
+    scaler_pca_Z_score = preprocessing.StandardScaler().fit(X_train_pca)
+    joblib.dump(scaler_pca_Z_score, output_path["XDI_DataTrans_path"])
+
+    save_config(input_path["config_path"], config, mylog)
+    mylog.info("XDI\tBuilding Finished")
+        
+    return None
+
+
+def OnLine_XDI(df_online, data_folder):
+
+    input_path, mylog, config = XDI_prepare(data_folder, Mode="OnLine")
+
+    for col in config["IDX"]:
+        try:
+            df_online = df_online.drop(col, axis=1)
+        except Exception as e:
+            msg = "XDI(Pre-process): There is no col named" + str(col) + "already."
+            mylog.warning(msg)
+            mylog.warning_trace(e)
+
+
+    # print(df_online.columns)
+    if config["XDI"]["Data_Transform_Check"] == 0:
+        module_transform_ = joblib.load(input_path["XDI_PreWork_DataTrans_path"])
+        df_online = module_transform_.transform(df_online)
+
+    X_online = df_online.copy()
+
+    module_PCA_ = joblib.load(input_path["XDI_PCA_path"])
+    X_online = module_PCA_.transform(X_online)
+
+    scaler_pca_Z_score_ = joblib.load(input_path["XDI_DataTrans_path"])
+    X_online = scaler_pca_Z_score_.transform(X_online)[0]
+
+    XDI_online_value = np.sqrt(sum(X_online * X_online))
+
+    mylog.info("XDI\tXDI_Value is " + str(XDI_online_value))
+
+    contribution_table = df_online.iloc[0].abs().sort_values(ascending=False)
+
+    df_contri = pd.DataFrame({"Col_Name": contribution_table.index,
+                              "Contribution": contribution_table.values})
+
+    XDI_Threshold = config["XDI"]["XDI_Threshold"]
+    XDI_check = XDI_Threshold > XDI_online_value
+
+
+    if XDI_check:
+        # OK
+        return XDI_online_value, XDI_Threshold, 1, df_contri[:20]
+    else:
+        # NG
+        return XDI_online_value, XDI_Threshold, 0, df_contri[:20]
+
+
+if __name__ == "__main__":
+    path = "/home/petertylin/PycharmProjects/00_Projects/00_AVM/AVM_System/Cases/T75R4_20190523/T75R4_20190523/T75R4_20190523_03/00/04_XDI/03_Test"
+    input_paths = read_path(path)
+
+    df = pd.read_csv(input_paths["x_train_path"])
+    for idx in range(df.shape[0]):
+        # print(type(df.iloc[idx]))
+        df_tmp = pd.DataFrame(data=df.iloc[idx].values.reshape(1,-1), columns=df.columns)
+        XDI, Threshold, XDI_check, df_con = OnLine_XDI(df_tmp, path)
+        # print(type(X), type(y))
+
+        print("input type:", type(df_tmp))
+        print("input shape:", df_tmp.shape)
+
+        print("Output type:", type(XDI), type(Threshold), type(XDI_check), type(df_con))
+        print("Output shape:", XDI.shape, df_con.shape)
+        print("Output XDI Value", XDI)
+        print("Output XDI threshold", Threshold)
+        print("Output XDI check", XDI_check)
+        print(df_con)
+        break
+
+#------------------------------------------------------------------------------------------------
+#XGB_model.py
+# coding: utf-8
+from Read_path import read_path
+from config import read_config, save_config
+from CreateLog import WriteLog
+
+import xgboost as xgb
+from xgboost import plot_importance
+import operator
+from matplotlib import pyplot as plt
+import pandas as pd
+import numpy as np
+#import os #新增前處理資料夾分類
+from sklearn.model_selection import train_test_split
+from scipy import stats ######找眾數######
+import os
+# # 我們來調參吧
+def xgb_tuning(data_folder):#輸入()，輸出()
+                
+    input_path = read_path(data_folder) #read Cases\CVD2E_Split1_Test\06_Model\XGB\file_path.json   
+    # init log
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log
+    # read config
+    config = read_config(input_path["config_path"], mylog) #read Cases\CVD2E_Split1_Test\00_config\config.json
+    
+    part=10 #每個範圍切10段
+    nround=1000 #最多跑1000顆
+    ES=100
+    nthread=4 #20190523 新增thread限制，避免吃完，default=4
+    #設定調參初始值
+    Originalp=[[6, 1], 0, [1, 1], 0, 1, 0.1, 500]
+    #依序輸入所有超參數的最小值與最大值。深、葉重、gamma、subsample、colsample_bytree、L1(懲罰係數)、L2(懲罰係數)、eta(學習率)
+    #float('inf')為無窮大，float('-inf')為負無窮
+    p=[['max_depth','min_child_weight'],'gamma',['subsample','colsample_bytree'],'alpha','lambda','eta','nround']
+    minPa=[[2, 1], 0, [0.0000001, 0.0000001], 0, 0, 0.00001]
+    maxPa=[[float('inf'), float('inf')], float('inf'), [1, 1], float('inf'), float('inf'), 1.00001]
+    #依序輸入所有超參數的首次測試極值
+    topall=[[2, 1], 0 ,[0.5, 0.3], 0, 0.9, 0]
+    tailall=[[10, 10], 3, [1, 1], 0.1, 1.1, 0.3]     
+    
+    xgb_parameter_path = os.path.join(data_folder, "xgb_parameter.json") #20190613 save xgb parameter to xgb_parameter.json
+    xgb_parameter = {}
+    xgb_parameter["part"] = part
+    xgb_parameter["nround"] = nround
+    xgb_parameter["ES"] = ES
+    xgb_parameter["nthread"] = nthread
+    xgb_parameter["Originalp"] = Originalp
+    xgb_parameter["p"] = p
+    xgb_parameter["minPa"] = minPa
+    xgb_parameter["maxPa"] = maxPa
+    xgb_parameter["topall"] = topall
+    xgb_parameter["tailall"] = tailall
+    #config["XGB_Parameter"] = xgb_parameter
+    #save_config(input_path["config_path"],config, mylog)
+    save_config(xgb_parameter_path,xgb_parameter, mylog)
+    mylog.info("-----XGB tuning-----")
+    
+    output_path={}
+    output_path["Param_aftertuning_path"] = os.path.join(data_folder, "Parameter_aftertuning.csv")
+    Param_aftertuning_path = output_path["Param_aftertuning_path"]
+             
+    x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+    x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+    y_Trainpath=input_path["y_train_path"] #訓練資料集路徑
+    #y_Testpath=input_path["y_test_path"] #訓練資料集路徑
+    delcol = config["IDX"]  #20190613 Index_Columns->IDX, avoid y_train error[2 column]
+    
+    try:
+        train=pd.read_csv(x_Trainpath)
+        test=pd.read_csv(x_Testpath)      
+        y_train=pd.read_csv(y_Trainpath).drop(delcol, axis=1)   #20190418 只留train的y      
+    except Exception as e:
+        mylog.error("Read raw data error")
+        mylog.error_trace(e) 
+    else:
+        X_train=train.drop(delcol, axis=1)                      #20190418 只留train的x
+        X_test=test.drop(delcol, axis=1)                        #20190418 只留test的x
+        X = pd.concat([X_train, X_test], axis=0, ignore_index=True) #20190329 垂直合併train及test的x 自動產生index
+    
+    AllParam=pd.DataFrame() #畫好參數調整總表的表格圖
+    ETALossv=[]  #紀錄ETA loss curve
+    ETALossp=[]  #紀錄ETA之測試值
+    ETALosst=[]
+    
+    ######這邊為設定驗證機制的部分########
+    XGTime=0 #設定迴圈初始值
+    die=0
+    seed=7 #在CV中，ran之defult值為0;在valid中seed=7
+       
+    while die==0:
+    ######以上為設定驗證機制的部分########
+        X_train1, X_val, y_train1, y_val = train_test_split(X_train, y_train, test_size=0.3, random_state=seed)
+        dtrain = xgb.DMatrix(X_train1, y_train1)
+        dval = xgb.DMatrix(X_val, y_val) #xgboost內部使用的資料結構
+        for j in range(len(p)-1):    
+    #         print('Start the \'{}\' test.'.format(p[j]))
+        #     M=pd.DataFrame() #清空儲存最小值的矩陣，換變數要記得改
+            t=0 #由參數1測試是否停止的計數器
+            t1=0 #由參數2測試是否停止的計數器
+            t2=0 #紀錄測試次數的計數器
+            top=topall[j] #給予起始範圍組
+            tail=tailall[j]
+    
+        ########################################################    
+        #####單變數測試##########################################
+        ########################################################
+    
+            if j in [1,3,4,5]:
+                choosemin=0 #若遇到同樣小的誤差，取較小的index
+                #給予測試範圍中的測試點值
+                if j == 5:
+                    choosemin=-1  #若遇到同樣小的誤差，取較大的index
+                while t <= 10:
+                    if t!=0: #判斷是否改變測試區間
+                        #處理自動轉換變數測試區間，一個變數值的轉換方式
+                        if minL1!=minPa[j] and (minL1==L1[0] or minL1==L1[1]): #處理左端點
+                            top=max(minPa[j], minL1-4*area)
+                            tail=min(minL1+area, maxPa[j])
+    #                         print('Min in the left side, move area.')
+                        elif minL1!=maxPa[j] and (minL1==L1[-1] or minL1==L1[-2]): #處理右端點
+                            top=max(minPa[j], minL1-area)
+                            tail=min(minL1+4*area, maxPa[j])
+    #                         print('Min in the right side, move area.')
+                        else:
+                            top=max(minPa[j], minL1-3*area)
+                            tail=min(minL1+2*area, maxPa[j])#處理剩下的點
+                            t=t+8
+    #                         print('Min in the intermediate area, change gap.')
+                #         print('The {}-th time range is ({},{}).'.format(t, top, tail))
+                    if (t <= 10):
+              ####開始暴力測試####
+    #                     print('The {}-th time the range of \'{}\' is ({},{}).'.format(t2+1, p[j], top, tail))
+                        area=(tail-top)/10 #area=(3-0)/10
+                        L1=np.append(np.arange(top, tail, area),[tail]) #別忘了最右邊的值，((0,3,0.3),3)
+    #                     print(L1)
+                        for i in range(len(L1)): #測試,i=0~10
+                            Originalp[j]=L1[i] ########## Originalp[1]=0...Originalp[1]=3
+    #                         print(Originalp)
+    #                         print(p[j],' : ', Originalp[j])
+                            params = {
+                                'booster': 'gbtree',
+                                'objective': 'reg:linear',
+                                'eval_metric':'rmse',
+                                'eta': Originalp[5],
+                                'max_depth': Originalp[0][0],
+                                'min_child_weight': Originalp[0][1],
+                                'gamma': Originalp[1],
+                                'subsample': Originalp[2][0],
+                                'colsample_bytree': Originalp[2][1],
+                                'reg_alpha': Originalp[3],
+                                'lambda': Originalp[4],
+                                'nthread': nthread
+                            }
+    
+                            evals_result = {}
+                            try:
+                                model = xgb.train(params, dtrain, num_boost_round=nround, evals=[(dtrain,'train'),(dval,'val')], early_stopping_rounds =ES, verbose_eval=False, evals_result=evals_result)                               
+                            except Exception as e:
+                                mylog.error("train error in j1345")
+                                mylog.error_trace(e) 
+                            else:
+                                AllParam=AllParam.append(pd.DataFrame({'Tuning step':['step:{}'.format(j+1)] ,p[0][0]:[Originalp[0][0]], p[0][1]:[Originalp[0][1]], p[1]:[Originalp[1]], p[2][0]:[Originalp[2][0]], p[2][1]:[Originalp[2][1]], p[3]:[Originalp[3]], p[4]:[Originalp[4]], p[5]:[Originalp[5]], p[6]:[model.best_iteration], 'Validation loss': model.best_score}), ignore_index=True)
+                                ###########這裡開始回傳參數值#########                           
+                            M1=AllParam[AllParam['Validation loss']==AllParam['Validation loss'].min()].index.tolist()[choosemin]
+                            M = AllParam.iloc[M1].to_frame().T.reset_index(drop=True) #只取最小loss的參數留下來
+                            M = M.rename(columns={'Validation loss': 'test_loss_mean', p[6]: 'iteration'})
+    
+    
+                            if j==5:
+                                ##########這裡開始記錄下所有的loss歷程點###########
+                                ETALossv.append(evals_result['val']['rmse']) #紀錄loss curve
+                                ETALosst.append(evals_result['train']['rmse']) #紀錄loss curve
+                                ETALossp.append([Originalp[j]]) #依次寫下相對的ETA點值
+                        t2=t2+1
+    #                     print(M)
+                        minL1=M.at[0,p[j]] #回傳出現最小值的L1 
+                        minloss=M.at[0, 'test_loss_mean']
+                        miniter=M.at[0, 'iteration']            
+    #                     print('In the {}-th time, min is {},iteration is {} and \'{}\' is {}.'\
+    #                           .format(t2, minloss, miniter, p[j], minL1))
+                        t=t+1
+                if j==5:
+                    Originalp[-1]=M.at[0,'iteration'] #把最後一次測出的最好顆樹替代初始值
+                Originalp[j]=minL1 ##把測出的最好變數值替代初始值
+        ########################################################    
+        #####樹的外型############################################
+        ########################################################
+            elif j==0:
+                while (t <= 10) and (t1 <= 10):
+                    if t!=0: #判斷是否改變測試區間
+                        for k in range(len(top)): #依次處理變數的計數列
+                            if k==0 and (t <= 10):
+                                if minL1[k]!=maxPa[j][k] and (minL1[k]==L1[k][-1] or minL1[k]==L1[k][-2]): #處理右端點
+                                    tail[k]=min(minL1[k]+4*area, maxPa[j][k])
+    #                                 print('Min of \'{}\' in the right side, move area.'.format(p[j][k]))
+                                else: #因為整數不用切細可以直接收工
+                                    t=t+10
+    
+                            elif k==1 and (t1 <= 10):
+                                if minL1[k]!=maxPa[j][k] and (minL1[k]==L1[k][-1] or minL1[k]==L1[k][-2]): #處理右端點
+                                    tail[k]=min(minL1[k]+4*area, maxPa[j][k])
+    #                                 print('Min of \'{}\' in the right side, move area.'.format(p[j][k]))
+                                else: #因為整數不用切細可以直接收工
+                                    t1=t1+10
+                    if (t <= 10) and (t1 <= 10):
+                    ####開始暴力測試####
+    #                     print('The {}-th time range, {} is ({},{}) and {} is ({},{}).'\
+    #                           .format(t2+1, p[j][0], top[0], tail[0], p[j][1], top[1], tail[1])) 
+                        area=1 #取整數
+                        L1=[]
+                        for k in range(len(top)): #分別建立兩參數的範圍與點值
+                            L1.append(range(top[k], tail[k]+1)) #20190419 L1=[range(2, 11), range(1, 11)]
+                        for a in range(len(L1[0])): #測試,len(L1[0])=9,len(L1[1])=10
+                            for b in range(len(L1[1])):
+                                i=(a+1)*(b+1)
+                                Originalp[j][0]=L1[0][a]
+                                Originalp[j][1]=L1[1][b]
+    #                             print(Originalp)
+    #                             print('\'max_depth\' is {}, \'min_child_weight\' is {}.'.format(Originalp[j][0], Originalp[j][1]))
+                                params = {
+                                    'booster': 'gbtree',
+                                    'objective': 'reg:linear',
+                                    'eval_metric':'rmse',
+                                    'eta': Originalp[5],
+                                    'max_depth': Originalp[0][0],
+                                    'min_child_weight': Originalp[0][1],
+                                    'gamma': Originalp[1],
+                                    'subsample': Originalp[2][0],
+                                    'colsample_bytree': Originalp[2][1],
+                                    'reg_alpha': Originalp[3],
+                                    'lambda': Originalp[4],
+                                    'nthread': nthread
+                                }
+                                evals_result = {}
+                                try:
+                                    model = xgb.train(params, dtrain, num_boost_round=nround, evals=[(dtrain,'train'),(dval,'val')], early_stopping_rounds =ES, verbose_eval=False, evals_result=evals_result)                                   
+                                except Exception as e:
+                                    mylog.error("train error in j0")
+                                    mylog.error_trace(e)
+                                else:
+                                    AllParam=AllParam.append(pd.DataFrame({'Tuning step':['step:{}'.format(j+1)] ,p[0][0]:[Originalp[0][0]], p[0][1]:[Originalp[0][1]], p[1]:[Originalp[1]], p[2][0]:[Originalp[2][0]], p[2][1]:[Originalp[2][1]], p[3]:[Originalp[3]], p[4]:[Originalp[4]], p[5]:[Originalp[5]], p[6]:[model.best_iteration], 'Validation loss': model.best_score}), ignore_index=True)
+                                    ###########這裡開始回傳參數值#########                                
+                                M = AllParam.iloc[AllParam['Validation loss'].idxmin(axis=1)].to_frame().T.reset_index(drop=True) #只取最小loss的參數留下來
+                                M = M.rename(columns={'Validation loss': 'test_loss_mean', p[6]: 'iteration'})
+    #                             print(M)
+    
+    
+                        t2=t2+1
+                        minL1=[]
+                        for k in range(len(top)): #分別建立兩參數出現最小值的參數值
+                            minL1.append(M[p[j][k]].reset_index(drop=True)[0]) #回傳出現最小值的L1                           
+    #                     print('In the {}-th time, min is {}, iteration is {}, \'{}\' is {} and \'{}\' is {}.'.format(t2, M['test_loss_mean'].reset_index(drop=True)[0],\
+    #                                                                                                              M['iteration'].reset_index(drop=True)[0],\
+    #                                                                                                                  p[j][0], minL1[0], p[j][1], minL1[1]))
+    
+                        t=t+1
+                        t1=t1+1  
+                Originalp[j][0]=int(minL1[0]) #用測試完的最好值替代初始值
+                Originalp[j][1]=int(minL1[1])
+    
+        #########################################################    
+        #####樹取樣###############################################
+        #########################################################
+            elif j==2:
+                while (t <= 10) and (t1 <= 10):
+                    if t!=0: #判斷是否改變測試區間
+                #         #處理自動轉換變數測試區間，兩個變數值的轉換方式
+                        for k in range(len(top)): #依次處理變數的計數列
+                            if k==0 and (t <= 10):
+                                if minL1[k]!=minPa[j][k] and (minL1[k]==L1[k][0] or minL1[k]==L1[k][1]): #處理左端點
+                                    top[k]=max(minPa[j][k], minL1[k]-4*area[k])
+                                    tail[k]=min(minL1[k]+area[k], maxPa[j][k])
+    #                                 print('Min of \'{}\' in the left side, move area.'.format(p[j][k]))
+                                elif minL1[k]!=maxPa[j][k] and (minL1[k]==L1[k][-1] or minL1[k]==L1[k][-2]): #處理右端點
+                                    top[k]=max(minPa[j][k], minL1[k]-area[k])
+                                    tail[k]=min(minL1[k]+4*area[k], maxPa[j][k])
+    #                                 print('Min of \'{}\' in the right side, move area.'.format(p[j][k]))
+                                else:
+                                    top[k]=max(minPa[j][k], minL1[k]-3*area[k])
+                                    tail[k]=min(minL1[k]+2*area[k], maxPa[j][k])#處理剩下的點
+                                    t=t+8
+    #                                 print('Min of \'{}\' in the intermediate area, change gap.'.format(p[j][k]))
+                            elif k==1 and (t1 <= 10):
+                                if minL1[k]!=minPa[j][k] and (minL1[k]==L1[k][0] or minL1[k]==L1[k][1]): #處理左端點
+                                    top[k]=max(minPa[j][k], minL1[k]-4*area[k])
+                                    tail[k]=min(minL1[k]+area[k], maxPa[j][k])
+    #                                 print('Min of \'{}\' in the left side, move area.'.format(p[j][k]))
+                                elif minL1[k]!=maxPa[j][k] and (minL1[k]==L1[k][-1] or minL1[k]==L1[k][-2]): #處理右端點
+                                    top[k]=max(minPa[j][k], minL1[k]-area[k])
+                                    tail[k]=min(minL1[k]+4*area[k], maxPa[j][k])
+    #                                 print('Min of \'{}\' in the right side, move area.'.format(p[j][k]))
+                                else:
+                                    top[k]=max(minPa[j][k], minL1[k]-3*area[k])
+                                    tail[k]=min(minL1[k]+2*area[k], maxPa[j][k])#處理剩下的點
+                                    t1=t1+8
+    #                                 print('Min of \'{}\' in the intermediate area, change gap.'.format(p[j][k]))
+                    if (t <= 10) and (t1 <= 10):
+                    ####開始暴力測試####
+    #                     print('The {}-th time range, {} is ({},{}) and {} is ({},{}).'\
+    #                           .format(t2+1, p[j][0], top[0], tail[0], p[j][1], top[1], tail[1])) 
+                        area=[]
+                        L1=[]
+                        for k in range(len(top)): #分別建立兩參數的範圍與點值
+                            area.append((tail[k]-top[k])/part) #分等分用
+                            L1.append(np.append(np.arange(top[k], tail[k], area[k]),[tail[k]])) #分等分用，別忘了最右邊的值
+    #                     print(area)
+    #                     print(L1)
+                        for a in range(len(L1[0])): #測試
+                            for b in range(len(L1[1])):
+                                i=(a+1)*(b+1)
+                                Originalp[j][0]=L1[0][a]
+                                Originalp[j][1]=L1[1][b]
+    #                             print(Originalp)
+    #                             print('{} is {}, {} is {}.'.format(p[j][0], Originalp[j][0], p[j][1], Originalp[j][1]))
+                                params = {
+                                    'booster': 'gbtree',
+                                    'objective': 'reg:linear',
+                                    'eval_metric':'rmse',
+                                    'eta': Originalp[5],
+                                    'max_depth': Originalp[0][0],
+                                    'min_child_weight': Originalp[0][1],
+                                    'gamma': Originalp[1],
+                                    'subsample': Originalp[2][0],
+                                    'colsample_bytree': Originalp[2][1],
+                                    'reg_alpha': Originalp[3],
+                                    'lambda': Originalp[4],
+                                    'nthread': nthread
+                                }
+                                evals_result = {}
+                                try:
+                                    model = xgb.train(params, dtrain, num_boost_round=nround, evals=[(dtrain,'train'),(dval,'val')], early_stopping_rounds =ES, verbose_eval=False, evals_result=evals_result)                                   
+                                except Exception as e:
+                                    mylog.error("train error in j2")
+                                    mylog.error_trace(e)
+                                else:
+                                    AllParam=AllParam.append(pd.DataFrame({'Tuning step':['step:{}'.format(j+1)] ,p[0][0]:[Originalp[0][0]], p[0][1]:[Originalp[0][1]], p[1]:[Originalp[1]], p[2][0]:[Originalp[2][0]], p[2][1]:[Originalp[2][1]], p[3]:[Originalp[3]], p[4]:[Originalp[4]], p[5]:[Originalp[5]], p[6]:[model.best_iteration], 'Validation loss': model.best_score}), ignore_index=True)
+                                    ###########這裡開始回傳參數值#########                                
+                                M = AllParam.iloc[AllParam['Validation loss'].idxmin(axis=1)].to_frame().T.reset_index(drop=True) #只取最小loss的參數留下來
+                                M = M.rename(columns={'Validation loss': 'test_loss_mean', p[6]: 'iteration'})
+    #                             print(M)
+    
+                        t2=t2+1
+                        minL1=[]
+                        for k in range(len(top)): #分別建立兩參數出現最小值的參數值
+                            minL1.append(M[p[j][k]].reset_index(drop=True)[0]) #回傳出現最小值的L1
+    #                     print('In the {}-th time, min is {}, iteration is {}, \'{}\' is {} and \'{}\' is {}.'.format(t2, M['test_loss_mean'].reset_index(drop=True)[0],\
+    #                                                                                                              M['iteration'].reset_index(drop=True)[0],\
+    #                                                                                                                  p[j][0], minL1[0], p[j][1], minL1[1]))               
+                        t=t+1
+                        t1=t1+1
+                Originalp[j][0]=minL1[0] #用測試完的最好值替代初始值
+                Originalp[j][1]=minL1[1]
+        Param=pd.DataFrame({'Params':p, 'Best Value':Originalp})
+    #     print(AllParam)
+    #     print(Param)
+        
+    ######以下為設定驗證機制的部分########
+        #######開始訓練######
+        bestP={}
+        for i in range(len(Param)):
+            if i in [1,3,4,5,6]:
+                bestP[Param['Params'][i]]=Param['Best Value'][i]
+            else:
+                for j in range(len(Param['Best Value'][i])):
+                    bestP[Param['Params'][i][j]]=Param['Best Value'][i][j]
+                    
+        bestP['nthread'] = nthread #20190523 新增thread限制，避免吃完
+        dtrain = xgb.DMatrix(X_train, y_train) 
+        watchlist = [(dtrain,'train')]
+        evals_result = {}
+        num_rounds = int(bestP['nround'])
+    #     print('begin')
+        try:
+            model = xgb.train(bestP, dtrain, num_rounds, watchlist, evals_result=evals_result, verbose_eval=False)                        
+        except Exception as e:
+            mylog.error("train error before predict X")
+            mylog.error_trace(e)
+        else:
+            pred = model.predict(xgb.DMatrix(X))
+            arr=stats.mode(pred)                  
+         
+        if arr[1][0] < (len(X)/2):  #arr[1][0]為眾數出現次數
+            die=die+1
+        elif XGTime == 10:
+            die=die+1
+            mylog.error("We trained XGboost 10 times. But still false, please give us more data and check the correction of data.")
+    #         print('We trained XGboost 10 times. But still false, please give us more data and check the correction of data.')
+        else:
+            seed= seed+1
+    #         print('We use random seed: {}.'.format(seed))
+        XGTime=XGTime+1
+    #print('We use random seed: {}.'.format(seed))
+    try:
+        Param.to_csv(Param_aftertuning_path, index=False) #把變數檔存起來        
+    except Exception as e:
+        mylog.error("Param to csv error")
+        mylog.error_trace(e)
+        
+#----------------------------------------------------------------------------------------------------------------
+def xgb_merge_tuning(data_folder):#輸入()，輸出()
+                
+    input_path = read_path(data_folder) #read Cases\CVD2E_Split1_Test\06_Model\XGB\file_path.json   
+    # init log
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log
+    # read config
+    config = read_config(input_path["config_path"], mylog) #read Cases\CVD2E_Split1_Test\00_config\config.json
+    
+    part=10 #每個範圍切10段
+    nround=1000 #最多跑1000顆
+    ES=100
+    nthread=4 #20190523 新增thread限制，避免吃完, default=4
+    #設定調參初始值
+    Originalp=[[6, 1], 0, [1, 1], 0, 1, 0.1, 500]
+    #依序輸入所有超參數的最小值與最大值。深、葉重、gamma、subsample、colsample_bytree、L1(懲罰係數)、L2(懲罰係數)、eta(學習率)
+    #float('inf')為無窮大，float('-inf')為負無窮
+    p=[['max_depth','min_child_weight'],'gamma',['subsample','colsample_bytree'],'alpha','lambda','eta','nround']
+    minPa=[[2, 1], 0, [0.0000001, 0.0000001], 0, 0, 0.00001]
+    maxPa=[[float('inf'), float('inf')], float('inf'), [1, 1], float('inf'), float('inf'), 1.00001]
+    #依序輸入所有超參數的首次測試極值
+    topall=[[2, 1], 0 ,[0.5, 0.3], 0, 0.9, 0]
+    tailall=[[10, 10], 3, [1, 1], 0.1, 1.1, 0.3]     
+    
+    xgb_parameter_path = os.path.join(data_folder, "xgb_parameter.json")
+    xgb_parameter = {}
+    xgb_parameter["part"] = part
+    xgb_parameter["nround"] = nround
+    xgb_parameter["ES"] = ES
+    xgb_parameter["nthread"] = nthread
+    xgb_parameter["Originalp"] = Originalp
+    xgb_parameter["p"] = p
+    xgb_parameter["minPa"] = minPa
+    xgb_parameter["maxPa"] = maxPa
+    xgb_parameter["topall"] = topall
+    xgb_parameter["tailall"] = tailall
+    #config["XGB_Parameter"] = xgb_parameter
+    #save_config(input_path["config_path"],config, mylog)
+    save_config(xgb_parameter_path,xgb_parameter, mylog)
+    
+    mylog.info("-----XGB merge tuning-----")
+    
+    output_path={}
+    output_path["Param_aftertuning_path"] = os.path.join(data_folder, "Parameter_aftertuning.csv")
+    Param_aftertuning_path = output_path["Param_aftertuning_path"]
+             
+    x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+    y_Trainpath=input_path["y_train_path"] #訓練資料集路徑
+    delcol = config["IDX"]   
+    
+    try:
+        train=pd.read_csv(x_Trainpath)    
+        y_train=pd.read_csv(y_Trainpath).drop(delcol, axis=1)   #20190418 只留train的y       
+    except Exception as e:
+        mylog.error("Read raw data error")
+        mylog.error_trace(e) 
+    else:
+        X_train=train.drop(delcol, axis=1)                      #20190418 只留train的x
+    
+    AllParam=pd.DataFrame() #畫好參數調整總表的表格圖
+    ETALossv=[]  #紀錄ETA loss curve
+    ETALossp=[]  #紀錄ETA之測試值
+    ETALosst=[]
+    
+    ######這邊為設定驗證機制的部分########
+    XGTime=0 #設定迴圈初始值
+    die=0
+    seed=7 #在CV中，ran之defult值為0;在valid中seed=7
+       
+    while die==0:
+    ######以上為設定驗證機制的部分########
+        X_train1, X_val, y_train1, y_val = train_test_split(X_train, y_train, test_size=0.3, random_state=seed)
+        dtrain = xgb.DMatrix(X_train1, y_train1)
+        dval = xgb.DMatrix(X_val, y_val) #xgboost內部使用的資料結構
+        for j in range(len(p)-1):    
+    #         print('Start the \'{}\' test.'.format(p[j]))
+        #     M=pd.DataFrame() #清空儲存最小值的矩陣，換變數要記得改
+            t=0 #由參數1測試是否停止的計數器
+            t1=0 #由參數2測試是否停止的計數器
+            t2=0 #紀錄測試次數的計數器
+            top=topall[j] #給予起始範圍組
+            tail=tailall[j]
+    
+        ########################################################    
+        #####單變數測試##########################################
+        ########################################################
+    
+            if j in [1,3,4,5]:
+                choosemin=0 #若遇到同樣小的誤差，取較小的index
+                #給予測試範圍中的測試點值
+                if j == 5:
+                    choosemin=-1  #若遇到同樣小的誤差，取較大的index
+                while t <= 10:
+                    if t!=0: #判斷是否改變測試區間
+                        #處理自動轉換變數測試區間，一個變數值的轉換方式
+                        if minL1!=minPa[j] and (minL1==L1[0] or minL1==L1[1]): #處理左端點
+                            top=max(minPa[j], minL1-4*area)
+                            tail=min(minL1+area, maxPa[j])
+    #                         print('Min in the left side, move area.')
+                        elif minL1!=maxPa[j] and (minL1==L1[-1] or minL1==L1[-2]): #處理右端點
+                            top=max(minPa[j], minL1-area)
+                            tail=min(minL1+4*area, maxPa[j])
+    #                         print('Min in the right side, move area.')
+                        else:
+                            top=max(minPa[j], minL1-3*area)
+                            tail=min(minL1+2*area, maxPa[j])#處理剩下的點
+                            t=t+8
+    #                         print('Min in the intermediate area, change gap.')
+                #         print('The {}-th time range is ({},{}).'.format(t, top, tail))
+                    if (t <= 10):
+              ####開始暴力測試####
+    #                     print('The {}-th time the range of \'{}\' is ({},{}).'.format(t2+1, p[j], top, tail))
+                        area=(tail-top)/10 #area=(3-0)/10
+                        L1=np.append(np.arange(top, tail, area),[tail]) #別忘了最右邊的值，((0,3,0.3),3)
+    #                     print(L1)
+                        for i in range(len(L1)): #測試,i=0~10
+                            Originalp[j]=L1[i] ########## Originalp[1]=0...Originalp[1]=3
+    #                         print(Originalp)
+    #                         print(p[j],' : ', Originalp[j])
+                            params = {
+                                'booster': 'gbtree',
+                                'objective': 'reg:linear',
+                                'eval_metric':'rmse',
+                                'eta': Originalp[5],
+                                'max_depth': Originalp[0][0],
+                                'min_child_weight': Originalp[0][1],
+                                'gamma': Originalp[1],
+                                'subsample': Originalp[2][0],
+                                'colsample_bytree': Originalp[2][1],
+                                'reg_alpha': Originalp[3],
+                                'lambda': Originalp[4],
+                                'nthread': nthread
+                            }
+    
+                            evals_result = {}
+                            try:
+                                model = xgb.train(params, dtrain, num_boost_round=nround, evals=[(dtrain,'train'),(dval,'val')], early_stopping_rounds =ES, verbose_eval=False, evals_result=evals_result)                               
+                            except Exception as e:
+                                mylog.error("train error in j1345")
+                                mylog.error_trace(e) 
+                            else:
+                                AllParam=AllParam.append(pd.DataFrame({'Tuning step':['step:{}'.format(j+1)] ,p[0][0]:[Originalp[0][0]], p[0][1]:[Originalp[0][1]], p[1]:[Originalp[1]], p[2][0]:[Originalp[2][0]], p[2][1]:[Originalp[2][1]], p[3]:[Originalp[3]], p[4]:[Originalp[4]], p[5]:[Originalp[5]], p[6]:[model.best_iteration], 'Validation loss': model.best_score}), ignore_index=True)
+                                ###########這裡開始回傳參數值#########                           
+                            M1=AllParam[AllParam['Validation loss']==AllParam['Validation loss'].min()].index.tolist()[choosemin]
+                            M = AllParam.iloc[M1].to_frame().T.reset_index(drop=True) #只取最小loss的參數留下來
+                            M = M.rename(columns={'Validation loss': 'test_loss_mean', p[6]: 'iteration'})
+    
+    
+                            if j==5:
+                                ##########這裡開始記錄下所有的loss歷程點###########
+                                ETALossv.append(evals_result['val']['rmse']) #紀錄loss curve
+                                ETALosst.append(evals_result['train']['rmse']) #紀錄loss curve
+                                ETALossp.append([Originalp[j]]) #依次寫下相對的ETA點值
+                        t2=t2+1
+    #                     print(M)
+                        minL1=M.at[0,p[j]] #回傳出現最小值的L1 
+                        minloss=M.at[0, 'test_loss_mean']
+                        miniter=M.at[0, 'iteration']            
+    #                     print('In the {}-th time, min is {},iteration is {} and \'{}\' is {}.'\
+    #                           .format(t2, minloss, miniter, p[j], minL1))
+                        t=t+1
+                if j==5:
+                    Originalp[-1]=M.at[0,'iteration'] #把最後一次測出的最好顆樹替代初始值
+                Originalp[j]=minL1 ##把測出的最好變數值替代初始值
+        ########################################################    
+        #####樹的外型############################################
+        ########################################################
+            elif j==0:
+                while (t <= 10) and (t1 <= 10):
+                    if t!=0: #判斷是否改變測試區間
+                        for k in range(len(top)): #依次處理變數的計數列
+                            if k==0 and (t <= 10):
+                                if minL1[k]!=maxPa[j][k] and (minL1[k]==L1[k][-1] or minL1[k]==L1[k][-2]): #處理右端點
+                                    tail[k]=min(minL1[k]+4*area, maxPa[j][k])
+    #                                 print('Min of \'{}\' in the right side, move area.'.format(p[j][k]))
+                                else: #因為整數不用切細可以直接收工
+                                    t=t+10
+    
+                            elif k==1 and (t1 <= 10):
+                                if minL1[k]!=maxPa[j][k] and (minL1[k]==L1[k][-1] or minL1[k]==L1[k][-2]): #處理右端點
+                                    tail[k]=min(minL1[k]+4*area, maxPa[j][k])
+    #                                 print('Min of \'{}\' in the right side, move area.'.format(p[j][k]))
+                                else: #因為整數不用切細可以直接收工
+                                    t1=t1+10
+                    if (t <= 10) and (t1 <= 10):
+                    ####開始暴力測試####
+    #                     print('The {}-th time range, {} is ({},{}) and {} is ({},{}).'\
+    #                           .format(t2+1, p[j][0], top[0], tail[0], p[j][1], top[1], tail[1])) 
+                        area=1 #取整數
+                        L1=[]
+                        for k in range(len(top)): #分別建立兩參數的範圍與點值
+                            L1.append(range(top[k], tail[k]+1)) #20190419 L1=[range(2, 11), range(1, 11)]
+                        for a in range(len(L1[0])): #測試,len(L1[0])=9,len(L1[1])=10
+                            for b in range(len(L1[1])):
+                                i=(a+1)*(b+1)
+                                Originalp[j][0]=L1[0][a]
+                                Originalp[j][1]=L1[1][b]
+    #                             print(Originalp)
+    #                             print('\'max_depth\' is {}, \'min_child_weight\' is {}.'.format(Originalp[j][0], Originalp[j][1]))
+                                params = {
+                                    'booster': 'gbtree',
+                                    'objective': 'reg:linear',
+                                    'eval_metric':'rmse',
+                                    'eta': Originalp[5],
+                                    'max_depth': Originalp[0][0],
+                                    'min_child_weight': Originalp[0][1],
+                                    'gamma': Originalp[1],
+                                    'subsample': Originalp[2][0],
+                                    'colsample_bytree': Originalp[2][1],
+                                    'reg_alpha': Originalp[3],
+                                    'lambda': Originalp[4],
+                                    'nthread': nthread
+                                }
+                                evals_result = {}
+                                try:
+                                    model = xgb.train(params, dtrain, num_boost_round=nround, evals=[(dtrain,'train'),(dval,'val')], early_stopping_rounds =ES, verbose_eval=False, evals_result=evals_result)                                   
+                                except Exception as e:
+                                    mylog.error("train error in j0")
+                                    mylog.error_trace(e)
+                                else:
+                                    AllParam=AllParam.append(pd.DataFrame({'Tuning step':['step:{}'.format(j+1)] ,p[0][0]:[Originalp[0][0]], p[0][1]:[Originalp[0][1]], p[1]:[Originalp[1]], p[2][0]:[Originalp[2][0]], p[2][1]:[Originalp[2][1]], p[3]:[Originalp[3]], p[4]:[Originalp[4]], p[5]:[Originalp[5]], p[6]:[model.best_iteration], 'Validation loss': model.best_score}), ignore_index=True)
+                                    ###########這裡開始回傳參數值#########                                
+                                M = AllParam.iloc[AllParam['Validation loss'].idxmin(axis=1)].to_frame().T.reset_index(drop=True) #只取最小loss的參數留下來
+                                M = M.rename(columns={'Validation loss': 'test_loss_mean', p[6]: 'iteration'})
+    #                             print(M)
+    
+    
+                        t2=t2+1
+                        minL1=[]
+                        for k in range(len(top)): #分別建立兩參數出現最小值的參數值
+                            minL1.append(M[p[j][k]].reset_index(drop=True)[0]) #回傳出現最小值的L1                           
+    #                     print('In the {}-th time, min is {}, iteration is {}, \'{}\' is {} and \'{}\' is {}.'.format(t2, M['test_loss_mean'].reset_index(drop=True)[0],\
+    #                                                                                                              M['iteration'].reset_index(drop=True)[0],\
+    #                                                                                                                  p[j][0], minL1[0], p[j][1], minL1[1]))
+    
+                        t=t+1
+                        t1=t1+1  
+                Originalp[j][0]=int(minL1[0]) #用測試完的最好值替代初始值
+                Originalp[j][1]=int(minL1[1])
+    
+        #########################################################    
+        #####樹取樣###############################################
+        #########################################################
+            elif j==2:
+                while (t <= 10) and (t1 <= 10):
+                    if t!=0: #判斷是否改變測試區間
+                #         #處理自動轉換變數測試區間，兩個變數值的轉換方式
+                        for k in range(len(top)): #依次處理變數的計數列
+                            if k==0 and (t <= 10):
+                                if minL1[k]!=minPa[j][k] and (minL1[k]==L1[k][0] or minL1[k]==L1[k][1]): #處理左端點
+                                    top[k]=max(minPa[j][k], minL1[k]-4*area[k])
+                                    tail[k]=min(minL1[k]+area[k], maxPa[j][k])
+    #                                 print('Min of \'{}\' in the left side, move area.'.format(p[j][k]))
+                                elif minL1[k]!=maxPa[j][k] and (minL1[k]==L1[k][-1] or minL1[k]==L1[k][-2]): #處理右端點
+                                    top[k]=max(minPa[j][k], minL1[k]-area[k])
+                                    tail[k]=min(minL1[k]+4*area[k], maxPa[j][k])
+    #                                 print('Min of \'{}\' in the right side, move area.'.format(p[j][k]))
+                                else:
+                                    top[k]=max(minPa[j][k], minL1[k]-3*area[k])
+                                    tail[k]=min(minL1[k]+2*area[k], maxPa[j][k])#處理剩下的點
+                                    t=t+8
+    #                                 print('Min of \'{}\' in the intermediate area, change gap.'.format(p[j][k]))
+                            elif k==1 and (t1 <= 10):
+                                if minL1[k]!=minPa[j][k] and (minL1[k]==L1[k][0] or minL1[k]==L1[k][1]): #處理左端點
+                                    top[k]=max(minPa[j][k], minL1[k]-4*area[k])
+                                    tail[k]=min(minL1[k]+area[k], maxPa[j][k])
+    #                                 print('Min of \'{}\' in the left side, move area.'.format(p[j][k]))
+                                elif minL1[k]!=maxPa[j][k] and (minL1[k]==L1[k][-1] or minL1[k]==L1[k][-2]): #處理右端點
+                                    top[k]=max(minPa[j][k], minL1[k]-area[k])
+                                    tail[k]=min(minL1[k]+4*area[k], maxPa[j][k])
+    #                                 print('Min of \'{}\' in the right side, move area.'.format(p[j][k]))
+                                else:
+                                    top[k]=max(minPa[j][k], minL1[k]-3*area[k])
+                                    tail[k]=min(minL1[k]+2*area[k], maxPa[j][k])#處理剩下的點
+                                    t1=t1+8
+    #                                 print('Min of \'{}\' in the intermediate area, change gap.'.format(p[j][k]))
+                    if (t <= 10) and (t1 <= 10):
+                    ####開始暴力測試####
+    #                     print('The {}-th time range, {} is ({},{}) and {} is ({},{}).'\
+    #                           .format(t2+1, p[j][0], top[0], tail[0], p[j][1], top[1], tail[1])) 
+                        area=[]
+                        L1=[]
+                        for k in range(len(top)): #分別建立兩參數的範圍與點值
+                            area.append((tail[k]-top[k])/part) #分等分用
+                            L1.append(np.append(np.arange(top[k], tail[k], area[k]),[tail[k]])) #分等分用，別忘了最右邊的值
+    #                     print(area)
+    #                     print(L1)
+                        for a in range(len(L1[0])): #測試
+                            for b in range(len(L1[1])):
+                                i=(a+1)*(b+1)
+                                Originalp[j][0]=L1[0][a]
+                                Originalp[j][1]=L1[1][b]
+    #                             print(Originalp)
+    #                             print('{} is {}, {} is {}.'.format(p[j][0], Originalp[j][0], p[j][1], Originalp[j][1]))
+                                params = {
+                                    'booster': 'gbtree',
+                                    'objective': 'reg:linear',
+                                    'eval_metric':'rmse',
+                                    'eta': Originalp[5],
+                                    'max_depth': Originalp[0][0],
+                                    'min_child_weight': Originalp[0][1],
+                                    'gamma': Originalp[1],
+                                    'subsample': Originalp[2][0],
+                                    'colsample_bytree': Originalp[2][1],
+                                    'reg_alpha': Originalp[3],
+                                    'lambda': Originalp[4],
+                                    'nthread': nthread
+                                }
+                                evals_result = {}
+                                try:
+                                    model = xgb.train(params, dtrain, num_boost_round=nround, evals=[(dtrain,'train'),(dval,'val')], early_stopping_rounds =ES, verbose_eval=False, evals_result=evals_result)                                   
+                                except Exception as e:
+                                    mylog.error("train error in j2")
+                                    mylog.error_trace(e)
+                                else:
+                                    AllParam=AllParam.append(pd.DataFrame({'Tuning step':['step:{}'.format(j+1)] ,p[0][0]:[Originalp[0][0]], p[0][1]:[Originalp[0][1]], p[1]:[Originalp[1]], p[2][0]:[Originalp[2][0]], p[2][1]:[Originalp[2][1]], p[3]:[Originalp[3]], p[4]:[Originalp[4]], p[5]:[Originalp[5]], p[6]:[model.best_iteration], 'Validation loss': model.best_score}), ignore_index=True)
+                                    ###########這裡開始回傳參數值#########                                
+                                M = AllParam.iloc[AllParam['Validation loss'].idxmin(axis=1)].to_frame().T.reset_index(drop=True) #只取最小loss的參數留下來
+                                M = M.rename(columns={'Validation loss': 'test_loss_mean', p[6]: 'iteration'})
+    #                             print(M)
+    
+                        t2=t2+1
+                        minL1=[]
+                        for k in range(len(top)): #分別建立兩參數出現最小值的參數值
+                            minL1.append(M[p[j][k]].reset_index(drop=True)[0]) #回傳出現最小值的L1
+    #                     print('In the {}-th time, min is {}, iteration is {}, \'{}\' is {} and \'{}\' is {}.'.format(t2, M['test_loss_mean'].reset_index(drop=True)[0],\
+    #                                                                                                              M['iteration'].reset_index(drop=True)[0],\
+    #                                                                                                                  p[j][0], minL1[0], p[j][1], minL1[1]))               
+                        t=t+1
+                        t1=t1+1
+                Originalp[j][0]=minL1[0] #用測試完的最好值替代初始值
+                Originalp[j][1]=minL1[1]
+        Param=pd.DataFrame({'Params':p, 'Best Value':Originalp})
+    #     print(AllParam)
+    #     print(Param)
+        
+    ######以下為設定驗證機制的部分########
+        #######開始訓練######
+        bestP={}
+        for i in range(len(Param)):
+            if i in [1,3,4,5,6]:
+                bestP[Param['Params'][i]]=Param['Best Value'][i]
+            else:
+                for j in range(len(Param['Best Value'][i])):
+                    bestP[Param['Params'][i][j]]=Param['Best Value'][i][j]
+                    
+        bestP['nthread'] = nthread #20190523 新增thread限制，避免吃完
+        dtrain = xgb.DMatrix(X_train, y_train) 
+        watchlist = [(dtrain,'train')]
+        evals_result = {}
+        num_rounds = int(bestP['nround'])
+    #     print('begin')
+        try:
+            model = xgb.train(bestP, dtrain, num_rounds, watchlist, evals_result=evals_result, verbose_eval=False)                        
+        except Exception as e:
+            mylog.error("train error before predict merge_X_train")
+            mylog.error_trace(e)
+        else:
+            pred = model.predict(xgb.DMatrix(X_train))
+            arr=stats.mode(pred)                  
+         
+        if arr[1][0] < (len(X_train)/2):  #arr[1][0]為眾數出現次數
+            die=die+1
+        elif XGTime == 10:
+            die=die+1
+            mylog.error("We trained XGboost 10 times. But still false, please give us more data and check the correction of data.")
+    #         print('We trained XGboost 10 times. But still false, please give us more data and check the correction of data.')
+        else:
+            seed= seed+1
+    #         print('We use random seed: {}.'.format(seed))
+        XGTime=XGTime+1
+    #print('We use random seed: {}.'.format(seed))
+    try:
+        Param.to_csv(Param_aftertuning_path, index=False) #把變數檔存起來        
+    except Exception as e:
+        mylog.error("Param to csv error")
+        mylog.error_trace(e)
+        
+#----------------------------------------------------------------------------------------------------------------
+
+def xgb_build(data_folder):#輸入()，輸出()
+    
+    output_path={}
+    output_path["ModelSave_path"] = os.path.join(data_folder, "XGB.model")   
+    output_path["FeatureScore_path"] = os.path.join(data_folder, "FeatureScore.csv")    #20190612 output FeatureScore
+    ModelSave_path = output_path["ModelSave_path"]
+        
+    input_path = read_path(data_folder) #read Cases\CVD2E_Split1_Test\06_Model\XGB\file_path.json   
+    # init log
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log    
+    mylog.info("-----XGB building-----")
+    # read config
+    config = read_config(input_path["config_path"], mylog) #read Cases\CVD2E_Split1_Test\00_config\config.json
+    xgb_parameter = read_config(input_path["xgb_parameter_path"], mylog) #20190614 read xgb_parameter.json
+    
+    x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+    #x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+    y_Trainpath=input_path["y_train_path"] #訓練資料集路徑
+    #y_Testpath=input_path["y_test_path"] #訓練資料集路徑
+    Param_aftertuning_path = input_path["xgb_tuning"] #20190523 改抓input_path
+    FeatureScore_path = output_path["FeatureScore_path"]
+    delcol = config["IDX"]  
+    nthread = xgb_parameter["nthread"] 
+    
+    try:
+        train=pd.read_csv(x_Trainpath)
+        #test=pd.read_csv(x_Testpath)      
+        y_train=pd.read_csv(y_Trainpath).drop(delcol, axis=1)   #20190418 只留train的y    
+        #y_test=pd.read_csv(y_Testpath).drop(delcol, axis=1)     #20190418 只留test的y      
+    except Exception as e:
+        mylog.error("Read raw data error")
+        mylog.error_trace(e) 
+    else:
+        X_train=train.drop(delcol, axis=1)                      #20190418 只留train的x
+        #X_test=test.drop(delcol, axis=1)                        #20190418 只留test的x
+        #X = pd.concat([X_train, X_test], axis=0, ignore_index=True) #20190329 垂直合併train及test的x 自動產生index
+    
+    Param_read = pd.read_csv(Param_aftertuning_path)    
+    Param = pd.DataFrame(Param_read)
+    """
+    print(len(Param['Best Value'][2]))
+    print(Param['Best Value'][2])
+    a = Param['Best Value'][2].replace("[", "")
+    b = a.replace("]", "")
+    c = b.split(', ', 1 )
+    print(c)
+    print(type(c))
+    print(len(c))
+    """
+    # # 把剛剛存起來的Param叫出來訓練    
+    bestP={}
+    for i in range(len(Param)):
+        if i in [1,3,4,5,6]:
+            bestP[Param['Params'][i]]=Param['Best Value'][i]
+        else:
+            #20190528 transfer string to list from csv
+            a = Param['Best Value'][i].replace("[", "")
+            b = a.replace("]", "")
+            c = b.split(', ', 1 )
+            for j in range(len(c)):
+                bestP[Param['Params'][i][j]]=c[j]
+    
+    bestP['nthread'] = nthread
+    dtrain = xgb.DMatrix(X_train, y_train)
+    watchlist = [(dtrain,'train')]
+    evals_result = {}
+    num_rounds = int(bestP['nround'])        
+    try:
+        model = xgb.train(bestP, dtrain, num_rounds, watchlist, evals_result=evals_result, verbose_eval=False)             
+    except Exception as e:
+        mylog.error("train error before save model")
+        mylog.error_trace(e)
+    else:
+        importance = model.get_fscore()
+        importance = sorted(importance.items(), key=operator.itemgetter(1))  
+        df = pd.DataFrame(importance, columns=['feature', 'fscore'])
+        df.to_csv(FeatureScore_path, index=False) 
+        model.save_model(ModelSave_path)    #20190426 save model for reuse          
+
+def xgb_predict(data_folder):##: 輸入()，輸出(啟動主程式，目前包成副函式，以後可在其他物件中，呼叫此副函式，減少物件的浪費)    
+    #20190422 從hotcode->讀取config==================================================
+    output_path={}    
+    #output_path["FeatureScore_path"] = os.path.join(data_folder, "FeatureScore.csv") 
+    output_path["Importance10_path"] = os.path.join(data_folder, "Importance10.jpg") 
+    output_path["Importance30_path"] = os.path.join(data_folder, "Importance30.jpg") 
+    output_path["testPredResult_path"] = os.path.join(data_folder, "testPredResult.csv")
+    output_path["trainPredResult_path"] = os.path.join(data_folder, "trainPredResult.csv") 
+    #output_path["ModelSave_path"] = os.path.join(data_folder, "XGB.model")       
+
+    #FeatureScore_path = output_path["FeatureScore_path"]
+    Importance10_path = output_path["Importance10_path"]
+    Importance30_path = output_path["Importance30_path"]
+    testPredResult_path = output_path["testPredResult_path"]
+    trainPredResult_path = output_path["trainPredResult_path"]    
+
+    # init log
+    input_path = read_path(data_folder) #read Cases\CVD2E_Split1_Test\06_Model\XGB\file_path.json
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log       
+    config = read_config(input_path["config_path"], mylog) #read Cases\CVD2E_Split1_Test\00_config\config.json
+        
+    # read config        
+    x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+    x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+    y_Trainpath=input_path["y_train_path"] #訓練資料集路徑
+    y_Testpath=input_path["y_test_path"] #訓練資料集路徑
+    ModelSave_path = input_path["xgb_model"] #20190523 改抓input_path
+    delcol = config["IDX"] 
+    y_config = config["Y"]
+    y_pred = y_config[0] + "_pred_XGB"
+    #=================================================================================   
+    
+    try:
+        train=pd.read_csv(x_Trainpath)
+        test=pd.read_csv(x_Testpath)      
+        y_train=pd.read_csv(y_Trainpath).drop(delcol, axis=1)   #20190418 只留train的y    
+        y_test=pd.read_csv(y_Testpath).drop(delcol, axis=1)     #20190418 只留test的y      
+    except Exception as e:
+        mylog.error("Read raw data error")
+        mylog.error_trace(e) 
+    else:
+        X_train=train.drop(delcol, axis=1)                      #20190418 只留train的x
+        X_test=test.drop(delcol, axis=1)                        #20190418 只留test的x
+        #X = pd.concat([X_train, X_test], axis=0, ignore_index=True) #20190329 垂直合併train及test的x 自動產生index
+        
+    mylog.info("-----XGB predict start-----")
+        
+    try:
+        model1=xgb.Booster(model_file=ModelSave_path)
+        dtest = xgb.DMatrix(X_test)              
+    except Exception as e:
+        mylog.error("train error before predict test")
+        mylog.error_trace(e)
+    else:
+        pre = model1.predict(dtest)                 
+    """
+    try:
+        importance = model1.get_fscore()
+        importance = sorted(importance.items(), key=operator.itemgetter(1))  
+        df = pd.DataFrame(importance, columns=['feature', 'fscore'])
+    except Exception as e:
+        mylog.error("FeatureScore to csv error")
+        mylog.error_trace(e)        
+    else:       
+        df.to_csv(FeatureScore_path, index=False)            
+    """   
+    try:
+        plot_importance(model1,max_num_features=30)       
+    except Exception as e:
+        mylog.error("Importance30 save error")
+        mylog.error_trace(e)        
+    else:
+        plt.savefig(Importance30_path, bbox_inches='tight') #20190507 因應ylabel cut off          
+
+    try:
+        plot_importance(model1,max_num_features=10)       
+    except Exception as e:
+        mylog.error("Importance10 save error")
+        mylog.error_trace(e)      
+    else:
+        plt.savefig(Importance10_path, bbox_inches='tight')        
+
+    try:
+        sheet_test = test[delcol] 
+        sheet_train = train[delcol]
+        ans = pd.DataFrame(pre,columns=[y_pred])  #20190430 Y_pred->config[Y]
+        output = pd.concat([y_test,ans],axis=1)
+        output = pd.concat([sheet_test,output],axis=1)
+        output['differ']=np.abs(output[y_config[0]]-output[y_pred])
+    except Exception as e:
+        mylog.error("testPredResult to csv error")
+        mylog.error_trace(e)
+    else:       
+        output.to_csv(testPredResult_path, index=False)        
+    
+    try:
+        dtrain = xgb.DMatrix(X_train)
+        pre_train = model1.predict(dtrain)
+        ans_train = pd.DataFrame(pre_train,columns=[y_pred]) 
+        output_train = pd.concat([y_train,ans_train],axis=1)
+        output_train = pd.concat([sheet_train,output_train],axis=1)
+        output_train['differ']=np.abs(output_train[y_config[0]]-output_train[y_pred])
+    except Exception as e:
+        mylog.error("trainPredResult to csv error")
+        mylog.error_trace(e)
+    else:          
+        output_train.to_csv(trainPredResult_path, index=False)  
+     
+    mylog.info("-----XGB predict Done-----") 
+    
+#------------------------------------------------------------------------------------------------------------------
+
+def xgb_merge_predict(data_folder):##: 輸入()，輸出(啟動主程式，目前包成副函式，以後可在其他物件中，呼叫此副函式，減少物件的浪費)    
+    #20190422 從hotcode->讀取config==================================================
+    output_path={}    
+    #output_path["FeatureScore_path"] = os.path.join(data_folder, "FeatureScore.csv") 
+    output_path["Importance10_path"] = os.path.join(data_folder, "Importance10.jpg") 
+    output_path["Importance30_path"] = os.path.join(data_folder, "Importance30.jpg") 
+    output_path["trainPredResult_path"] = os.path.join(data_folder, "trainPredResult.csv")     
+
+    #FeatureScore_path = output_path["FeatureScore_path"]
+    Importance10_path = output_path["Importance10_path"]
+    Importance30_path = output_path["Importance30_path"]
+    trainPredResult_path = output_path["trainPredResult_path"]    
+
+    # init log
+    input_path = read_path(data_folder) #read Cases\CVD2E_Split1_Test\06_Model\XGB\file_path.json
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log       
+    config = read_config(input_path["config_path"], mylog) #read Cases\CVD2E_Split1_Test\00_config\config.json
+        
+    # read config        
+    x_Trainpath=input_path["x_train_path"] #訓練資料集路徑
+    y_Trainpath=input_path["y_train_path"] #訓練資料集路徑
+    ModelSave_path = input_path["xgb_model"] #20190523 改抓input_path
+    delcol = config["IDX"] 
+    y_config = config["Y"]
+    y_pred = y_config[0] + "_pred_XGB"
+    #=================================================================================   
+        
+    try:
+        train=pd.read_csv(x_Trainpath)  
+        y_train=pd.read_csv(y_Trainpath).drop(delcol, axis=1)   #20190418 只留train的y         
+    except Exception as e:
+        mylog.error("Read raw data error")
+        mylog.error_trace(e) 
+    else:
+        X_train=train.drop(delcol, axis=1)                      #20190418 只留train的x
+        
+    mylog.info("-----XGB merge predict start-----")
+        
+    try:
+        model1=xgb.Booster(model_file=ModelSave_path)
+        dtrain = xgb.DMatrix(X_train)              
+    except Exception as e:
+        mylog.error("train error before predict test")
+        mylog.error_trace(e)
+    else:
+        pre = model1.predict(dtrain)                 
+    """
+    try:
+        importance = model1.get_fscore()
+        importance = sorted(importance.items(), key=operator.itemgetter(1))  
+        df = pd.DataFrame(importance, columns=['feature', 'fscore'])
+    except Exception as e:
+        mylog.error("FeatureScore to csv error")
+        mylog.error_trace(e)        
+    else:       
+        df.to_csv(FeatureScore_path, index=False)            
+    """  
+    try:
+        plot_importance(model1,max_num_features=30)       
+    except Exception as e:
+        mylog.error("Importance30 save error")
+        mylog.error_trace(e)        
+    else:
+        plt.savefig(Importance30_path, bbox_inches='tight') #20190507 因應ylabel cut off          
+
+    try:
+        plot_importance(model1,max_num_features=10)       
+    except Exception as e:
+        mylog.error("Importance10 save error")
+        mylog.error_trace(e)      
+    else:
+        plt.savefig(Importance10_path, bbox_inches='tight')        
+
+    try:
+        sheet_train = train[delcol]
+        ans = pd.DataFrame(pre,columns=[y_pred])
+        output = pd.concat([y_train,ans],axis=1)
+        output = pd.concat([sheet_train,output],axis=1)
+        output['differ']=np.abs(output[y_config[0]]-output[y_pred])
+    except Exception as e:
+        mylog.error("trainPredResult to csv error")
+        mylog.error_trace(e)
+    else:       
+        output.to_csv(trainPredResult_path, index=False)            
+       
+    mylog.info("-----XGB merge predict Done-----")   
+#------------------------------------------------------------------------------------------------------------------
+    
+def xgb_batch_predict(data_folder):##: 輸入()，輸出(啟動主程式，目前包成副函式，以後可在其他物件中，呼叫此副函式，減少物件的浪費)    
+    #20190422 從hotcode->讀取config==================================================
+    output_path={}    
+    #output_path["FeatureScore_path"] = os.path.join(data_folder, "FeatureScore.csv") 
+    output_path["Importance10_path"] = os.path.join(data_folder, "Importance10.jpg") 
+    output_path["Importance30_path"] = os.path.join(data_folder, "Importance30.jpg") 
+    output_path["testPredResult_path"] = os.path.join(data_folder, "testPredResult.csv")   
+
+    #FeatureScore_path = output_path["FeatureScore_path"]
+    Importance10_path = output_path["Importance10_path"]
+    Importance30_path = output_path["Importance30_path"]
+    testPredResult_path = output_path["testPredResult_path"]  
+
+    # init log
+    input_path = read_path(data_folder) #read Cases\CVD2E_Split1_Test\06_Model\XGB\file_path.json
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    #mylog.init_logger() #設定info存在System.log,error存在error.log       
+    config = read_config(input_path["config_path"], mylog) #read Cases\CVD2E_Split1_Test\00_config\config.json
+        
+    # read config        
+    x_Testpath=input_path["x_test_path"] #訓練資料集路徑
+    y_Testpath=input_path["y_test_path"] #訓練資料集路徑
+    ModelSave_path = input_path["xgb_model"] #20190523 改抓input_path
+    delcol = config["IDX"] 
+    y_config = config["Y"]
+    y_pred = y_config[0] + "_pred_XGB"
+    #=================================================================================   
+    if os.path.isfile(y_Testpath):
+        try:
+            test=pd.read_csv(x_Testpath)        
+            y_test=pd.read_csv(y_Testpath).drop(delcol, axis=1)     #20190418 只留test的y      
+        except Exception as e:
+            mylog.error("Read raw data error")
+            mylog.error_trace(e) 
+        else:
+            X_test=test.drop(delcol, axis=1)                        #20190418 只留test的x
+            
+        mylog.info("-----XGB batch predict start-----")
+            
+        try:
+            model1=xgb.Booster(model_file=ModelSave_path)
+            dtest = xgb.DMatrix(X_test)              
+        except Exception as e:
+            mylog.error("train error before predict test")
+            mylog.error_trace(e)
+        else:
+            pre = model1.predict(dtest)                 
+
+        try:
+            plot_importance(model1,max_num_features=30)       
+        except Exception as e:
+            mylog.error("Importance30 save error")
+            mylog.error_trace(e)        
+        else:
+            plt.savefig(Importance30_path, bbox_inches='tight') #20190507 因應ylabel cut off          
+    
+        try:
+            plot_importance(model1,max_num_features=10)       
+        except Exception as e:
+            mylog.error("Importance10 save error")
+            mylog.error_trace(e)      
+        else:
+            plt.savefig(Importance10_path, bbox_inches='tight')            
+    
+        try:
+            sheet_test = test[delcol] 
+            ans = pd.DataFrame(pre,columns=[y_pred])
+            output = pd.concat([y_test,ans],axis=1)
+            output = pd.concat([sheet_test,output],axis=1)
+            output['differ']=np.abs(output[y_config[0]]-output[y_pred])
+        except Exception as e:
+            mylog.error("testPredResult to csv error")
+            mylog.error_trace(e)
+        else:       
+            output.to_csv(testPredResult_path, index=False)  
+            
+    else:
+        try:
+            test=pd.read_csv(x_Testpath)           
+        except Exception as e:
+            mylog.error("Read raw data error")
+            mylog.error_trace(e) 
+        else:
+            X_test=test.drop(delcol, axis=1)                        #20190418 只留test的x
+            
+        mylog.info("-----XGB batch predict start-----")
+            
+        try:
+            model1=xgb.Booster(model_file=ModelSave_path)
+            dtest = xgb.DMatrix(X_test)              
+        except Exception as e:
+            mylog.error("train error before predict test")
+            mylog.error_trace(e)
+        else:
+            pre = model1.predict(dtest)                 
+
+        try:
+            plot_importance(model1,max_num_features=30)       
+        except Exception as e:
+            mylog.error("Importance30 save error")
+            mylog.error_trace(e)        
+        else:
+            plt.savefig(Importance30_path, bbox_inches='tight') #20190507 因應ylabel cut off          
+    
+        try:
+            plot_importance(model1,max_num_features=10)       
+        except Exception as e:
+            mylog.error("Importance10 save error")
+            mylog.error_trace(e)      
+        else:
+            plt.savefig(Importance10_path, bbox_inches='tight')            
+    
+        try:
+            sheet_test = test[delcol] 
+            ans = pd.DataFrame(pre,columns=[y_pred])
+            output = pd.concat([sheet_test,ans],axis=1)
+        except Exception as e:
+            mylog.error("testPredResult to csv error")
+            mylog.error_trace(e)
+        else:       
+            output.to_csv(testPredResult_path, index=False) 
+        
+    mylog.info("-----XGB batch predict Done-----")  
+
+def xgb_online_predict(data_folder, df_x_test, df_y_test=None):##: 輸入()，輸出(啟動主程式，目前包成副函式，以後可在其他物件中，呼叫此副函式，減少物件的浪費)    
+    # init log
+    input_path = read_path(data_folder) #read Cases\CVD2E_Split1_Test\06_Model\XGB\file_path.json
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])    
+    config = read_config(input_path["config_path"], mylog) #read Cases\CVD2E_Split1_Test\00_config\config.json
+        
+    # read config        
+    ModelSave_path = input_path["xgb_model"] #20190523 改抓input_path
+    #delcol = db_data['IDX']    
+    delcol = config["IDX"]
+    y_config = config["Y"]
+    y_pred = y_config[0] + "_pred_XGB"
+    """
+    if delcol.find(',') != -1:
+        delcol_list = delcol.split(",")
+    """
+
+    if df_y_test is not None:
+        #X_test=x_test_df.drop(delcol_list, axis=1)                       
+        #y_test=y_test_df.drop(delcol_list, axis=1)  
+        X_test=df_x_test.drop(delcol, axis=1)                       
+        y_test=df_y_test.drop(delcol, axis=1) 
+            
+        mylog.info("-----XGB online predict Y start-----")
+            
+        try:
+            model1=xgb.Booster(model_file=ModelSave_path)
+            dtest = xgb.DMatrix(X_test)              
+        except Exception as e:
+            mylog.error("train error before predict test")
+            mylog.error_trace(e)
+        else:
+            pre = model1.predict(dtest)                     
+    
+        try:
+            ans = pd.DataFrame(pre,columns=[y_pred])  #20190430 pred->Y_pred
+        except Exception as e:
+            mylog.error("testPredResult to csv error")
+            mylog.error_trace(e)
+        else:       
+            return ans[y_pred][0], y_test[y_config[0]][0]
+            
+    else:
+        #X_test=x_test_df.drop(delcol_list, axis=1)  
+        X_test=df_x_test.drop(delcol, axis=1)                     
+            
+        mylog.info("-----XGB online predict X start-----")
+            
+        try:
+            model1=xgb.Booster(model_file=ModelSave_path)
+            dtest = xgb.DMatrix(X_test)              
+        except Exception as e:
+            mylog.error("train error before predict test")
+            mylog.error_trace(e)
+        else:
+            pre = model1.predict(dtest)                    
+    
+        try:
+            ans = pd.DataFrame(pre,columns=[y_pred])  #20190430 pred->Y_pred
+        except Exception as e:
+            mylog.error("testPredResult to csv error")
+            mylog.error_trace(e)
+        else:       
+            return ans[y_pred][0]   #20190621 because return series, must assign location
+    mylog.info("-----XGB online predict Done-----")  
+     
+#呼叫主函式    
+#data_folder = "D:/AVM/Cases/CVD2E_Split1_T75R4_batch_test/CVD2E_Split1_T75R4_batch_test_00/00/06_Model/XGB" 
+#xgb_tuning(data_folder)
+#xgb_build(data_folder)
+#xgb_predict(data_folder)
+
+#-------------------------------------------------------------------------------------------------------------
+#YDI.py
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.externals import joblib
+from sklearn.decomposition import PCA
+from sklearn import preprocessing
+import os
+import matplotlib.cm as cm
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_samples, silhouette_score
+from config import read_config, save_config
+from Read_path import read_path
+from CreateLog import WriteLog
+plt.style.use('ggplot')
+plt.ioff()
+
+#setting_filter_pca_threshold = 0.8
+
+
+# this YDI module is for single Y, the multiple Y
+
+def YDI_prepare(folder_paths, Mode):
+
+    input_paths = read_path(folder_paths)
+    mylogs = WriteLog(input_paths["log_path"], input_paths["error_path"])
+    configs = read_config(input_paths["config_path"], mylogs)
+
+    if Mode in ["OnLine"]:
+        return input_paths, mylogs, configs
+
+    ###
+    output_paths = {}
+    if Mode in ["Train"]:
+        output_paths["YDI_Group_path"] = os.path.join(folder_paths, "YDI_Group/")
+        output_paths["YDI_threshold_table_path"] = os.path.join(folder_paths, "YDI_threshold_table.csv")
+        output_paths["YDI_PreWork_DataTrans"] = os.path.join(folder_paths, "YDI_PreWork_DataTrans.pkl")
+        path_ = output_paths["YDI_Group_path"]
+        if not os.path.exists(path_):
+            os.makedirs(path_)
+
+    if Mode in ["Test"]:
+        output_paths["YDI_Offline_report_path"] = os.path.join(folder_paths, "YDI_Offline_Report.csv")
+        output_paths["YDI_Group_path"] = os.path.join(folder_paths, "YDI_Group/")
+        path_ = output_paths["YDI_Group_path"]
+        if not os.path.exists(path_):
+            os.makedirs(path_)
+
+    return input_paths, output_paths, mylogs, configs
+
+
+def read_data(data_path_, mylog_):
+    try:
+        data_ = pd.read_csv(data_path_)
+    except Exception as e:
+        mylog_.error("YDI: Read Raw Data ERROR.")
+        mylog_.error_trace(e)
+
+    return data_
+
+
+def YDI_Pre_Process(data_paths, index_cols, mylogs):
+
+    data = read_data(data_paths, mylogs)
+    df_idx = data[index_cols].copy()
+
+    for col in index_cols:
+        try:
+            data = data.drop(col, axis=1)
+        except Exception as e:
+            msg = "YDI(Pre-process): There is no col named" + str(col) + "already."
+            mylogs.warning(msg)
+            mylogs.warning_trace(e)
+
+    return data, df_idx
+
+
+def YDI_PreWork_Train(data_path, configs, YDI_PreWork_DataTrans_paths, mylogs):
+
+    # check if Data Transform was executed in Data Pre-Process
+    if "DataTrans" not in configs["Data_Preprocess_Steps"]:
+        data, df_idx = YDI_Pre_Process(data_path, configs["IDX"], mylogs)
+        configs["YDI"]["Data_Transform_Check"] = 0
+        scaler_raw_Z_score = preprocessing.StandardScaler().fit(data)
+        col_ = data.columns
+        data = scaler_raw_Z_score.transform(data)
+        data = pd.DataFrame(data=data, columns=col_)
+        data = pd.concat([data, df_idx], axis=1)
+        joblib.dump(scaler_raw_Z_score, YDI_PreWork_DataTrans_paths)
+
+    elif "DataTrans" in configs["Data_Preprocess_Steps"]:
+        data = read_data(data_path, mylogs)
+        configs["YDI"]["Data_Transform_Check"] = 1
+
+    return data, configs
+
+
+def YDI_PreWork_Test(data_paths, index_cols, check_prework_DataTrans, YDI_PreWork_DataTrans_paths, mylogs):
+
+    if check_prework_DataTrans == 0:
+        data, df_idx = YDI_Pre_Process(data_paths, index_cols, mylogs)
+        col_ = data.columns
+        module_transform_ = joblib.load(YDI_PreWork_DataTrans_paths)
+        data = module_transform_.transform(data)
+        data = pd.DataFrame(data=data, columns=col_)
+        data = pd.concat([data, df_idx], axis=1)
+
+    elif check_prework_DataTrans == 1:
+        data = read_data(data_paths, mylogs)
+    # print(data)
+    return data
+
+
+def Clustering_Testing(X_train, cluster_path):
+    max_clusters_amount = min(10, X_train.shape[0]-1)
+    # print(max_clusters_amount)
+
+    ideal_clusters_amount = 1
+    max_silhouette_score = -1
+
+    for n_clusters in range(2, max_clusters_amount + 1):
+        clusterer = KMeans(n_clusters=n_clusters, random_state=0).fit(X_train)
+        cluster_labels = clusterer.fit_predict(X_train)
+        # print(cluster_labels)
+        silhouette_avg = silhouette_score(X_train, cluster_labels)
+        # print("For n_clusters =", n_clusters,
+        #       "The average silhouette_score is :", silhouette_avg)
+        if silhouette_avg > max_silhouette_score:
+            max_silhouette_score = silhouette_avg
+            ideal_clusters_amount = n_clusters
+        
+        if X_train.shape[1] == 1:
+            continue
+        # Draw Clustering Pic
+        fig, (ax1, ax2) = plt.subplots(1, 2)
+        fig.set_size_inches(18, 7)
+        sample_silhouette_values = silhouette_samples(X_train, cluster_labels)
+        y_lower = 10
+        for i in range(n_clusters):
+            # Aggregate the silhouette scores for samples belonging to
+            # cluster i, and sort them
+            ith_cluster_silhouette_values = \
+                sample_silhouette_values[cluster_labels == i]
+
+            ith_cluster_silhouette_values.sort()
+
+            size_cluster_i = ith_cluster_silhouette_values.shape[0]
+            y_upper = y_lower + size_cluster_i
+
+            color = cm.nipy_spectral(float(i) / n_clusters)
+            ax1.fill_betweenx(np.arange(y_lower, y_upper),
+                              0, ith_cluster_silhouette_values,
+                              facecolor=color, edgecolor=color, alpha=0.7)
+
+            # Label the silhouette plots with their cluster numbers at the middle
+            ax1.text(-0.05, y_lower + 0.5 * size_cluster_i, str(i))
+
+            # Compute the new y_lower for next plot
+            y_lower = y_upper + 10  # 10 for the 0 samples
+
+        ax1.set_title("The silhouette plot for the various clusters.")
+        ax1.set_xlabel("The silhouette coefficient values")
+        ax1.set_ylabel("Cluster label")
+
+        # The vertical line for average silhouette score of all the values
+        ax1.axvline(x=silhouette_avg, color="red", linestyle="--")
+
+        ax1.set_yticks([])  # Clear the yaxis labels / ticks
+        ax1.set_xticks([-0.1, 0, 0.2, 0.4, 0.6, 0.8, 1])
+
+        # print(X_train)
+        colors = cm.nipy_spectral(cluster_labels.astype(float) / n_clusters)
+        ax2.scatter(X_train[:, 0], X_train[:, 1], marker='.', s=300, lw=0, alpha=0.7,
+                    c=colors, edgecolor='k')
+
+        # Labeling the clusters
+        centers = clusterer.cluster_centers_
+        # Draw white circles at cluster centers
+        ax2.scatter(centers[:, 0], centers[:, 1], marker='o',
+                    c="white", alpha=1, s=1000, edgecolor='k')
+
+        for i, c in enumerate(centers):
+            ax2.scatter(c[0], c[1], marker='$%d$' % i, alpha=1,
+                        s=600, edgecolor='k')
+
+        ax2.set_title("The visualization of the clustered data.")
+        ax2.set_xlabel("Feature space for the 1st feature")
+        ax2.set_ylabel("Feature space for the 2nd feature")
+        YDI_tmp_path = os.path.join(cluster_path, "cluster_" + str(n_clusters) + ".png")
+        plt.savefig(YDI_tmp_path)
+        plt.clf()
+
+    return ideal_clusters_amount
+
+
+def YDI_judger(YDI_value, threshold):
+    # print(YDI_value, type(YDI_value))
+    if np.isnan(YDI_value):
+        return "NY"
+    if YDI_value > threshold:
+        return "NG"
+    elif YDI_value <= threshold:
+        return "OK"
+
+
+
+def YDI_threshold_generator(X_trains, y_trains, Y_cols, pca_threshold, groups, group_path):
+
+    if groups is None:
+        group_folder_path_ = os.path.join(group_path, "NO_GROUP")
+    elif groups is not None:
+        group_folder_path_ = os.path.join(group_path, str(groups))
+
+    if not os.path.exists(group_folder_path_):
+        os.makedirs(group_folder_path_)
+
+    cluster_pic_path = os.path.join(group_folder_path_, "YDI_Clustering/")
+    if not os.path.exists(cluster_pic_path):
+        os.makedirs(cluster_pic_path)
+
+    pca_model_path = os.path.join(group_folder_path_, "YDI_PCA.pkl")
+    module_PCA = PCA(n_components=pca_threshold).fit(X_trains)
+    X_trains = module_PCA.transform(X_trains)
+    joblib.dump(module_PCA, pca_model_path)
+
+
+    ideal_clusters_amount = Clustering_Testing(X_trains, cluster_pic_path)
+    module_Clustering = KMeans(n_clusters=ideal_clusters_amount, random_state=0).fit(X_trains)
+
+    cluster_model_path = os.path.join(group_folder_path_, "YDI_Clustering.pkl")
+    joblib.dump(module_Clustering, cluster_model_path)
+
+    # 計算Kmeans分群後各個群 y的實際平均值
+    list_cluster_y_avg = []
+    list_cluster_y_range = []
+
+    # df_YDI = pd.DataFrame({"Y": [],
+    #                        "Cluster_idx": [],
+    #                        "Y_avg": [],
+    #                        "YDI_thrshold": []})
+    df_YDI = pd.DataFrame()
+    for col in Y_cols:
+        y_values = y_trains[col]
+        for cluster_idx in range(ideal_clusters_amount):
+            list_cluster_index = np.where(np.array(module_Clustering.predict(X_trains) == cluster_idx))
+            list_cluster_values = np.array(y_trains.iloc[list_cluster_index])
+            list_cluster_y_avg.append(np.mean(list_cluster_values))
+            list_cluster_y_range.append(np.max(list_cluster_values) - np.min(list_cluster_values))
+
+        cluster_Max_Range = np.max(list_cluster_y_range)
+        y_avg = np.array(list_cluster_y_avg)
+
+        '''
+        y avg revised goal:
+        
+        -1: * -1
+        0 : + 1
+        +1: do nothing
+        
+        
+        '''
+        y_avg_re = (y_avg + ((y_avg == 0) + 0)) * (((y_avg < 0) * -1) + (y_avg >= 0) * 1)
+
+        y_YDI = pd.DataFrame({"Y": [col] * ideal_clusters_amount,
+                              "Cluster_idx": list(range(ideal_clusters_amount)),
+                              "Y_avg": list_cluster_y_avg,
+                              "YDI_Thrshold": cluster_Max_Range / y_avg_re,
+                              "Interval": cluster_Max_Range})
+
+        df_YDI = pd.concat([df_YDI, y_YDI], axis=0)
+
+    threshold_table_path = os.path.join(group_folder_path_, "YDI_threshold_table.csv")
+    df_YDI.to_csv(threshold_table_path, index=False)
+    return df_YDI
+
+
+def YDI_report_generator(X_trains, X_tests, y_trains, y_tests, train_idxs, test_idxs,
+                         Y_cols, group_col_name, groups, input_group_path, output_group_path, Mode):
+
+    if groups is None:
+        group_folder_path_ = os.path.join(input_group_path, "NO_GROUP")
+    elif groups is not None:
+        group_folder_path_ = os.path.join(input_group_path, str(groups))
+
+    # YDI_result_path = os.path.join(output_group_path, "YDI_Group/")
+    # if not os.path.exists(YDI_result_path):
+    #     os.makedirs(YDI_result_path)
+
+    pca_model_path = os.path.join(group_folder_path_, "YDI_PCA.pkl")
+    module_PCA_ = joblib.load(pca_model_path)
+    X_train = module_PCA_.transform(X_trains)
+
+    if Mode in ["Train", "Batch"]:
+        if X_tests.shape[0] == 0:
+            X_test = np.array([])
+            X_data = X_train
+        elif X_tests.shape[0] != 0:
+            X_test = module_PCA_.transform(X_tests)
+            X_data = np.concatenate((X_train, X_test), axis=0)
+    elif Mode in ["Merge"]:
+        X_test = np.array([])
+        X_data = X_train
+
+
+    cluster_model_path = os.path.join(group_folder_path_, "YDI_Clustering.pkl")
+    module_Clustering_ = joblib.load(cluster_model_path)
+
+
+    df_y = pd.concat([y_trains, y_tests], axis=0)
+    # y_data = np.concatenate((y_train, y_test), axis=0)
+    cluster_idx = module_Clustering_.predict(X_data)
+
+    threshold_table_path = os.path.join(group_folder_path_, "YDI_threshold_table.csv")
+    df_YDI_table = pd.read_csv(threshold_table_path)
+    df_YDI = pd.concat([train_idxs, test_idxs], axis=0, ignore_index=True)
+
+
+    YDI_offline_group_table = pd.DataFrame()
+    for col in Y_cols:
+
+        df_YDI_table_y = df_YDI_table.loc[(df_YDI_table["Y"] == col)].set_index(['Cluster_idx'])
+
+        y_avg = np.array(df_YDI_table_y['Y_avg'].iloc[cluster_idx])
+        YDI_threshold = np.array(df_YDI_table_y['YDI_Thrshold'].iloc[cluster_idx])
+        y_values = np.array(df_y[col])
+        y_avg_re = (y_avg + ((y_avg == 0) + 0)) * (((y_avg < 0) * -1) + (y_avg >= 0) * 1)
+        YDI_values = np.abs(y_values - y_avg) / y_avg_re
+
+        df_YDI["YDI"] = np.array(YDI_values)
+        df_YDI["YDI_Threshold"] = YDI_threshold
+        df_YDI["Cluster_idx"] = cluster_idx
+        df_YDI["Y_avg"] = y_avg
+        df_YDI["Y_values"] = y_values
+        df_YDI["Y"] = col
+        df_YDI["Data"] = ["Train"] * X_train.shape[0] + ["Test"] * X_test.shape[0]
+        df_YDI["Interval"] = np.array(df_YDI_table_y['Interval'].iloc[cluster_idx])
+
+        # print(df_YDI['YDI'])
+        df_YDI["Result"] = np.vectorize(YDI_judger)(df_YDI['YDI'], df_YDI["YDI_Threshold"])
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        # plt.plot(YDI_values, label='YDI', c='b')
+        plt.scatter(range(YDI_values.shape[0]), YDI_values, c="b", label="YDI")
+        plt.plot(YDI_threshold, label='YDI threshold', c='r')
+        if df_YDI["Result"].isin(["NG"]).any():
+            idx = df_YDI["Result"].loc[df_YDI["Result"] == "NG"].index
+            plt.scatter(idx, df_YDI["YDI"].iloc[idx], c="r", label="NG")
+        ax.axvline(x=X_train.shape[0], c='g', label='Train/Test Split Line')
+        ax.set_title("YDI  (" + str(col) + ")")
+        plt.legend()
+        if group_col_name is not None:
+            filename = "_".join(["YDI_offline", str(col), str(group_col_name), str(groups)])
+        elif group_col_name is None:
+            filename = "_".join(["YDI_offline", str(col)])
+        pic_path = output_group_path + filename + ".png"
+        plt.savefig(pic_path)
+        plt.clf()
+
+        YDI_path = output_group_path + filename + ".csv"
+        df_YDI.to_csv(YDI_path, index=False)
+        YDI_offline_group_table = pd.concat([YDI_offline_group_table, df_YDI], axis=0)
+
+    return YDI_offline_group_table
+
+
+
+# def YDI_off_line_report(data_folder):
 #
+#     input_path, output_path, mylog, config = YDI_prepare(data_folder, Mode="Test")
+#     mylog.info("-----YDI Offline-----")
+#     # print(config["YDI"])
+#     X_train = YDI_PreWork_Test(input_path["x_train_path"],
+#                                config["IDX"],
+#                                config["YDI"]["Data_Transform_Check"],
+#                                input_path["YDI_PreWork_DataTrans"],
+#                                mylog)
+#
+#     X_test = YDI_PreWork_Test(input_path["x_test_path"],
+#                               config["IDX"],
+#                               config["YDI"]["Data_Transform_Check"],
+#                               input_path["YDI_PreWork_DataTrans"],
+#                               mylog)
+#
+#     df_train_idx = X_train[config["IDX"]]
+#     df_test_idx = X_test[config["IDX"]]
+#     y_train = read_data(input_path["y_train_path"], mylog)
+#     y_train = y_train[config["Y"]]
+#     y_test = read_data(input_path["y_test_path"], mylog)
+#     y_test = y_test[config["Y"]]
+#
+#
+#     if config["filter_feature"] is not None:
+#         group_col = config["filter_feature"]
+#         # group_col = config["filter_feature"]
+#         # print(group_col)
+#         YDI_Off_line_table = pd.DataFrame()
+#         for groups in np.unique(X_train[group_col]):
+#             group_idx_train = X_train.loc[X_train[group_col] == groups].index
+#             group_idx_test = X_test.loc[X_test[group_col] == groups].index
+#
+#             X_train_data = X_train.iloc[group_idx_train].reset_index(drop=True)
+#             X_train_data = X_train_data.drop(config["IDX"], axis=1)
+#             y_train_data = y_train.iloc[group_idx_train].reset_index(drop=True)
+#
+#             X_test_data = X_test.iloc[group_idx_test].reset_index(drop=True)
+#             X_test_data = X_test_data.drop(config["IDX"], axis=1)
+#             y_test_data = y_test.iloc[group_idx_test].reset_index(drop=True)
+#
+#             train_idx_data = df_train_idx.iloc[group_idx_train].reset_index(drop=True)
+#             test_idx_data = df_test_idx.iloc[group_idx_test].reset_index(drop=True)
+#
+#
+#             # print(groups)
+#             # print(X_train_data.shape, y_train_data.shape, X_test_data.shape, y_test_data.shape)
+#
+#             YDI_Off_line_group_table = YDI_report_generator(X_train_data,
+#                                                             X_test_data,
+#                                                             y_train_data,
+#                                                             y_test_data,
+#                                                             train_idx_data,
+#                                                             test_idx_data,
+#                                                             config["Y"],
+#                                                             group_col,
+#                                                             groups,
+#                                                             input_path["YDI_Group_path"],
+#                                                             output_path["YDI_Group_path"])
+#
+#
+#             YDI_Off_line_group_table["filter_feature"] = groups
+#
+#             YDI_Off_line_table = pd.concat([YDI_Off_line_table, YDI_Off_line_group_table], axis=0)
+#             # if config["filter_feature"] in config["Index_Columns"]:
+#             #     YDI_Off_line_table = pd.concat([YDI_Off_line_table, YDI_Off_line_group_table], axis=0)
+#             #
+#             #
+#             # if config["filter_feature"] not in config["Index_Columns"]:
+#             #     YDI_Off_line_group_table[config["filter_feature"]] = groups
+#             # YDI_Off_line_table = pd.concat([YDI_Off_line_table, YDI_Off_line_group_table], axis=0)
+#
+#
+#     elif config["filter_feature"] is None:
+#         X_train = X_train.drop(config["Index_Columns"], axis=1)
+#         X_test = X_test.drop(config["Index_Columns"], axis=1)
+#         YDI_Off_line_table = YDI_report_generator(X_train,
+#                                                   X_test,
+#                                                   y_train,
+#                                                   y_test,
+#                                                   df_train_idx,
+#                                                   df_test_idx,
+#                                                   config["Y"],
+#                                                   None,
+#                                                   None,
+#                                                   input_path["YDI_Group_path"],
+#                                                   output_path["YDI_Group_path"])
+#
+#     YDI_Off_line_table["Index_Columns"] = \
+#         YDI_Off_line_table[config["Index_Columns"]].apply(lambda x: '_'.join(str(e) for e in x), axis=1)
+#     YDI_Off_line_table.to_csv(output_path["YDI_Offline_report_path"],index=False)
+#
+#     mylog.info("-----YDI Offline Done-----")
+#     return None
+
+
+def YDI_Data_Prepare(X_paths, y_paths, YDI_DataTrans_paths, configs, mylogs):
+    dfs = YDI_PreWork_Test(X_paths,
+                           configs["IDX"],
+                           configs["YDI"]["Data_Transform_Check"],
+                           YDI_DataTrans_paths,
+                           mylogs)
+
+    dfs_idx = dfs[configs["IDX"]]
+    dfs_y = read_data(y_paths, mylogs)
+    dfs_y = dfs_y[configs["Y"]]
+
+    return dfs, dfs_idx, dfs_y
+
+def YDI_off_line_report(data_folder, mode):
+
+
+    input_path, output_path, mylog, config = YDI_prepare(data_folder, Mode="Test")
+
+    mylog.info("YDI\tOffline Report Start")
+    # print(config["YDI"])
+    if mode in ["Train", "Merge"]:
+        X_train, df_train_idx, y_train = YDI_Data_Prepare(input_path["x_train_path"],
+                                                          input_path["y_train_path"],
+                                                          input_path["YDI_PreWork_DataTrans"],
+                                                          config,
+                                                          mylog)
+    elif mode in ["Batch"]:
+        X_train, df_train_idx, y_train = YDI_Data_Prepare(input_path["x_train_path"],
+                                                          input_path["y_train_path"],
+                                                          input_path["YDI_PreWork_DataTrans"],
+                                                          config,
+                                                          mylog)
+
+
+    if mode in ["Train", "Batch"]:
+        X_test, df_test_idx, y_test = YDI_Data_Prepare(input_path["x_test_path"],
+                                                       input_path["y_test_path"],
+                                                       input_path["YDI_PreWork_DataTrans"],
+                                                       config,
+                                                       mylog)
+    elif mode in ["Merge"]:
+        X_test = pd.DataFrame(columns=X_train.columns)
+        df_test_idx = pd.DataFrame(columns=df_train_idx.columns)
+        y_test = pd.DataFrame(columns=y_train.columns)
+
+
+    if config["Filter_Feature"] is not None:
+        group_col = config["Filter_Feature"]
+        # group_col = config["filter_feature"]
+        # print(group_col)
+        YDI_Off_line_table = pd.DataFrame()
+        for groups in np.unique(X_train[group_col]):
+            group_idx_train = X_train.loc[X_train[group_col] == groups].index
+            group_idx_test = X_test.loc[X_test[group_col] == groups].index
+
+            X_train_data = X_train.iloc[group_idx_train].reset_index(drop=True)
+            X_train_data = X_train_data.drop(config["IDX"], axis=1)
+            y_train_data = y_train.iloc[group_idx_train].reset_index(drop=True)
+
+            X_test_data = X_test.iloc[group_idx_test].reset_index(drop=True)
+            X_test_data = X_test_data.drop(config["IDX"], axis=1)
+            y_test_data = y_test.iloc[group_idx_test].reset_index(drop=True)
+
+            train_idx_data = df_train_idx.iloc[group_idx_train].reset_index(drop=True)
+            test_idx_data = df_test_idx.iloc[group_idx_test].reset_index(drop=True)
+
+
+            # print(groups)
+            # print(X_train_data.shape, y_train_data.shape, X_test_data.shape, y_test_data.shape)
+
+            YDI_Off_line_group_table = YDI_report_generator(X_train_data,
+                                                            X_test_data,
+                                                            y_train_data,
+                                                            y_test_data,
+                                                            train_idx_data,
+                                                            test_idx_data,
+                                                            config["Y"],
+                                                            group_col,
+                                                            groups,
+                                                            input_path["YDI_Group_path"],
+                                                            output_path["YDI_Group_path"],
+                                                            Mode=mode)
+
+
+            YDI_Off_line_group_table["Filter_Feature"] = groups
+
+            YDI_Off_line_table = pd.concat([YDI_Off_line_table, YDI_Off_line_group_table], axis=0)
+
+
+    elif config["Filter_Feature"] is None:
+        X_train = X_train.drop(config["Index_Columns"], axis=1)
+        X_test = X_test.drop(config["Index_Columns"], axis=1)
+        YDI_Off_line_table = YDI_report_generator(X_train,
+                                                  X_test,
+                                                  y_train,
+                                                  y_test,
+                                                  df_train_idx,
+                                                  df_test_idx,
+                                                  config["Y"],
+                                                  None,
+                                                  None,
+                                                  input_path["YDI_Group_path"],
+                                                  output_path["YDI_Group_path"],
+                                                  Mode=mode)
+
+        YDI_Off_line_table["Filter_Feature"] = \
+            YDI_Off_line_table[config["Index_Columns"]].apply(lambda x: '_'.join(str(e) for e in x), axis=1)
+
+    YDI_Off_line_table["Index_Columns"] = \
+        YDI_Off_line_table[config["Index_Columns"]].apply(lambda x: '_'.join(str(e) for e in x), axis=1)
+    YDI_Off_line_table.to_csv(output_path["YDI_Offline_report_path"],index=False)
+
+    msg_YDI = "OK"
+    if "NG" in YDI_Off_line_table["Result"].values:
+        msg_YDI = "NG"
+
+    mylog.info("YDI\tOffline Report Finished")
+    return msg_YDI
+
+
+def Build_YDI_Model(data_folder):
+
+    input_path, output_path, mylog, config = YDI_prepare(data_folder, Mode="Train")
+
+    mylog.info("YDI\tModel Building Start")
+    X_train, config = YDI_PreWork_Train(input_path["x_train_path"],
+                                        config,
+                                        output_path["YDI_PreWork_DataTrans"],
+                                        mylog)
+
+    y_train = read_data(input_path["y_train_path"], mylog)
+    y_train = y_train[config["Y"]]
+
+    if config["Filter_Feature"] is not None:
+        group_col = config["Filter_Feature"]
+        YDI_threshold_table = pd.DataFrame()
+        # print(group_col)
+        for groups in np.unique(X_train[group_col]):
+            # print(X_train)
+            group_idx_list = X_train.loc[X_train[group_col] == groups].index
+
+            X_data = X_train.iloc[group_idx_list].reset_index(drop=True)
+            X_data = X_data.drop(config["IDX"], axis=1)
+            y_data = y_train.iloc[group_idx_list].reset_index(drop=True)
+            # print(groups)
+            # print(X_data.shape, y_data.shape)
+            YDI_threshold_table_G = YDI_threshold_generator(X_data,
+                                                            y_data,
+                                                            config["Y"],
+                                                            config["YDI"]["filter_pca_threshold"],
+                                                            groups,
+                                                            output_path["YDI_Group_path"])
+
+            YDI_threshold_table_G[config["Filter_Feature"]] = groups
+            YDI_threshold_table = pd.concat([YDI_threshold_table, YDI_threshold_table_G], axis=0)
+            # break
+
+    else:
+        X_train = X_train.drop(config["IDX"], axis=1)
+        YDI_threshold_table = YDI_threshold_generator(X_train,
+                                                      y_train,
+                                                      config["Y"],
+                                                      config["YDI"]["filter_pca_threshold"],
+                                                      None,
+                                                      output_path["YDI_Group_path"])
+
+    YDI_threshold_table.to_csv(output_path["YDI_threshold_table_path"], index=False)
+    mylog.info("YDI\tModel Building Finished")
+    save_config(input_path["config_path"], config, mylog)
+    return None
+
+
+def YDI_report_generator_Online(df_x, df_y, Y_col_list, group_col_name, groups, input_group_path):
+
+    if groups is None:
+        group_folder_path_ = os.path.join(input_group_path, "NO_GROUP")
+    elif groups is not None:
+        group_folder_path_ = os.path.join(input_group_path, str(groups))
+
+
+    pca_model_path = os.path.join(group_folder_path_, "YDI_PCA.pkl")
+    module_PCA_ = joblib.load(pca_model_path)
+    df_x_pca = module_PCA_.transform(df_x)
+
+    cluster_model_path = os.path.join(group_folder_path_, "YDI_Clustering.pkl")
+    module_Clustering_ = joblib.load(cluster_model_path)
+
+    # y_data = np.concatenate((y_train, y_test), axis=0)
+    cluster_idx = module_Clustering_.predict(df_x_pca)[0]
+
+    threshold_table_path = os.path.join(group_folder_path_, "YDI_threshold_table.csv")
+    df_YDI_table = pd.read_csv(threshold_table_path)
+
+
+    list_YDI_values = []
+    list_YDI_check = []
+    list_YDI_Threshold = []
+    list_Y_avg = []
+    list_interval = []
+
+    for col in Y_col_list:
+        df_YDI_table_y = df_YDI_table.loc[(df_YDI_table["Y"] == col)].set_index(['Cluster_idx'])
+        y_avg = df_YDI_table_y['Y_avg'].iloc[cluster_idx]
+        y_avg_re = (y_avg + ((y_avg == 0) + 0)) * (((y_avg < 0) * -1) + (y_avg >= 0) * 1)
+        YDI_values = np.abs(df_y[col].iloc[-1] - y_avg) / y_avg_re
+        YDI_threshold = df_YDI_table_y['YDI_Thrshold'].iloc[cluster_idx]
+        YDI_interval = df_YDI_table_y['Interval'].iloc[cluster_idx]
+
+        list_YDI_values.append(YDI_values)
+        list_Y_avg.append(y_avg)
+        list_YDI_Threshold.append(YDI_threshold)
+        list_interval.append(YDI_interval)
+
+
+        YDI_check = YDI_threshold > YDI_values
+
+        if YDI_check:
+            # OK
+            list_YDI_check.append(1)
+        else:
+            # NG
+            list_YDI_check.append(0)
+
+
+    df_YDI_online = pd.DataFrame({
+                                  "Y": Y_col_list,
+                                  "Cluster_idx": cluster_idx,
+                                  "YDI": list_YDI_values,
+                                  "YDI_Threshold": list_YDI_Threshold,
+                                  "YDI_Check": list_YDI_check,
+                                  "Interval": list_interval,
+                                  "Y_avg": list_Y_avg
+                                  })
+    return df_YDI_online
+
+
+def df_drop_col(dfs, drop_col_list, mylogs):
+    df_idx = dfs[drop_col_list]
+
+    for col in drop_col_list:
+        try:
+            dfs = dfs.drop(col, axis=1)
+        except Exception as e:
+            msg = "YDI(Pre-process): There is no col named" + str(col) + "already."
+            mylogs.warning(msg)
+            mylogs.warning_trace(e)
+
+    return dfs, df_idx
+
+
+def OnLine_YDI(df_online_x, df_online_y, data_folder):
+
+    input_path, mylog, config = YDI_prepare(data_folder, Mode="OnLine")
+
+    mylog.info("YDI Online\n Start")
+
+    df_x, df_x_idx = df_drop_col(df_online_x, config["IDX"], mylog)
+    df_y, df_y_idx = df_drop_col(df_online_y, config["IDX"], mylog)
+
+    if config["YDI"]["Data_Transform_Check"] == 0:
+        module_transform_ = joblib.load(input_path["YDI_PreWork_DataTrans_path"])
+        df_x = module_transform_.transform(df_x)
+
+    if config["Filter_Feature"] is not None:
+        group_col = config["Filter_Feature"]
+        groups = df_x_idx[group_col].iloc[-1]
+
+        df_YDI_online = YDI_report_generator_Online(df_x, df_y,
+                                                    config["Y"], config["Filter_Feature"],
+                                                    groups, input_path["YDI_Group_path"])
+    else:
+        df_YDI_online = YDI_report_generator_Online(df_x, df_y,
+                                                    config["Y"], config["Filter_Feature"],
+                                                    None, input_path["YDI_Group_path"])
+
+    mylog.info("YDI Online\n Finished")
+    return df_YDI_online
+
+
+if __name__ == "__main__":
+    path = "/home/petertylin/PycharmProjects/00_Projects/00_Smart_Prediction/AVM_System/Cases/T75R4_20190523/T75R4_20190523/T75R4_20190523_03/00/05_YDI/03_Test"
+    path = "/home/petertylin/PycharmProjects/00_Projects/00_Smart_Prediction/AVM_System/Cases/TTP/TTP/TTP_00/00/05_YDI/01_Test"
+    input_paths = read_path(path)
+
+    df_x = pd.read_csv(input_paths["x_train_path"])
+    df_y = pd.read_csv(input_paths["y_train_path"])
+    for idx in range(df_x.shape[0]):
+        df_tmp_x = pd.DataFrame(data=df_x.iloc[idx].values.reshape(1,-1), columns=df_x.columns)
+        df_tmp_y = pd.DataFrame(data=df_y.iloc[idx].values.reshape(1, -1), columns=df_y.columns)
+        # print(df_tmp_x)
+        # print(df_tmp_y)
+        X = OnLine_YDI(df_tmp_x, df_tmp_y, path)
+
+        print("input type:", type(df_tmp_x), type(df_tmp_y))
+        print("input shape:", df_tmp_x.shape, df_tmp_y.shape)
+
+        print("Output type:", type(X))
+        print("Output shape:", X.shape)
+        print("Output YDI table")
+        print(X)
+
+        break
