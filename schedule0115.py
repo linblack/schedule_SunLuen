@@ -4761,4 +4761,617 @@ if __name__ == '__main__':
     timer(3) 
     
     
+   
+# DB_operation.py
+# -*- coding: utf-8 -*-
+import pyodbc
+import pandas as pd
+import SystemConfig.ServerConfig as ServerConfig # Reaver
+import APLog as APLog                            # Reaver
+
+def DB_Connection(server_name="10.97.36.137", db_name = "APC"):
+    #server_name = "10.97.36.137"
+    #db_name = "APC"
+    user = ServerConfig.UID
+    password = ServerConfig.PWD      
+    cnxn1 = pyodbc.connect('DRIVER={SQL Server};SERVER=' + server_name + ';DATABASE=' + db_name + ';UID=' + user + ';PWD=' + password)
     
+    return cnxn1
+
+def select_project_creating(server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT WHERE UPPER(STATUS) in ('CREATING','CREATING_RUN','RETRAINING') order by ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_waitcreate(server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT WHERE UPPER(STATUS) in ('CREATED','CREATING_ERROR_OK') order by ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_waitretrain(server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT A, SVM_PROJECT_MODEL B where A.PROJECT_ID = B.PROJECT_ID AND UPPER(A.STATUS) = 'RETRAIN' AND UPPER(B.STATUS) = 'RETRAIN' AND RETRAIN_START_TIME is null"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+
+def select_project_AI365(server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT WHERE UPPER(STATUS) = 'ONLINE' AND MODEL_TYPE IN ('1','2','3') order by ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_otm_by_onlineserver(online_server, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT where MODEL_TYPE IN ('1','2') AND UPPER(STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND ONLINE_SERVER = '" + str(online_server) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_otm_by_onlineserver_predictresult(online_server, predict_result, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select C.*, D.MODEL_ID, D.MODEL_SEQ from (select * from SVM_PROJECT where MODEL_TYPE IN ('1','2') AND UPPER(STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND ONLINE_SERVER = '" + str(online_server) + r"') C, (select * from SVM_PROJECT_MODEL where UPPER(RETRAIN_TYPE) in ('ABNORMAL','ABNORMAL->ONLINE') AND PREDICT_RESULT = '" + str(predict_result) + r"' and PREDICT_START_TIME is not null and RETRAIN_END_TIME is not null) D where C.PROJECT_ID = D.PROJECT_ID"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_mtm_by_onlineserver(online_server, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT where MODEL_TYPE IN ('3') AND UPPER(STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND ONLINE_SERVER = '" + str(online_server) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_mtm_by_onlineserver_predictresult(online_server, predict_result, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select C.*, D.MODEL_ID, D.MODEL_SEQ from (select * from SVM_PROJECT where MODEL_TYPE IN ('3') AND UPPER(STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND ONLINE_SERVER = '" + str(online_server) + r"') C right join (select * from SVM_PROJECT_MODEL where UPPER(RETRAIN_TYPE) in ('ABNORMAL','ABNORMAL->ONLINE') AND PREDICT_RESULT = '" + str(predict_result) + r"' and PREDICT_START_TIME is not null and RETRAIN_END_TIME is not null) D on C.PROJECT_ID = D.PROJECT_ID"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_by_projectid(project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 =ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT where PROJECT_ID = '" + str(project_id) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+
+def select_project_by_status(status, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 =ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT where UPPER(STATUS) = '" + str(status) + r"' order by ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_by_status_ip(status, ip, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT where UPPER(STATUS) = '" + str(status) + r"' and TRAINING_SERVER = '" + str(ip) +  r"' order by ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_config_by_modelid_1ST_2ND_3RD(model_id, parameter_1st, parameter_2nd, parameter_3rd, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_CONFIG where MODEL_ID = '" + str(model_id) + r"' and UPPER(PARAMETER_1ST) = '" + str(parameter_1st) + r"' and UPPER(PARAMETER_2ND) = '" + str(parameter_2nd) + r"' and UPPER(PARAMETER_3RD) = '" + str(parameter_3rd) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_config_by_modelid_parameter3RD(model_id, parameter_3rd, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_CONFIG where MODEL_ID = '" + str(model_id) + r"' and UPPER(PARAMETER_3RD) = '" + str(parameter_3rd) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_confirmok_o2m(server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT A, SVM_PROJECT_MODEL B WHERE A.PROJECT_ID = B.PROJECT_ID AND UPPER(A.STATUS) in ('CREATING_PAUSE') AND A.MODEL_TYPE IN ('1','2') AND B.WAIT_CONFIRM in (0,2) order by A.ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_confirmok_m2m(server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT C, (select * from SVM_PROJECT_MODEL A, (select max(MODEL_ID) as max_model from SVM_PROJECT_MODEL group by PROJECT_ID) B where A.MODEL_ID = B.max_model and WAIT_CONFIRM in (0,2)) D where c.PROJECT_ID = D.PROJECT_ID and c.MODEL_TYPE = '3' and upper(c.STATUS) = 'CREATING_PAUSE' order by C.ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_by_modelid(model_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL where MODEL_ID = '" + str(model_id) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_by_modelname(model_name, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL where MODEL_NAME = '" + str(model_name) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_by_modelname_status(model_name, status, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL where MODEL_NAME = '" + str(model_name) + r"' AND UPPER(STATUS) = '" + str(status) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_by_projectid(project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL where PROJECT_ID = '" + str(project_id) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_maxmodel_by_projectid(project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL A, (select max(MODEL_ID) as max_model from SVM_PROJECT_MODEL where PROJECT_ID = '" + str(project_id) + r"' group by PROJECT_ID) B where A.MODEL_ID = B.max_model"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_with_model_by_projectid(project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT A, SVM_PROJECT_MODEL B where A.PROJECT_ID = B.PROJECT_ID AND A.PROJECT_ID = '" + str(project_id) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_with_model_by_projectid_onlineserver_predictstatus_modelstatus(project_id, online_server, predict_status, model_status, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 =ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT A, SVM_PROJECT_MODEL B where A.PROJECT_ID = B.PROJECT_ID AND A.PROJECT_ID = '" + str(project_id) + r"' AND A.ONLINE_SERVER = '" + str(online_server) + r"' AND A.PREDICT_STATUS = '" + str(predict_status) + r"' and B.STATUS = '" + str(model_status) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_by_projectid_abnormal(project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL where PROJECT_ID = '" + str(project_id) + r"' AND UPPER(RETRAIN_TYPE) in ('ABNORMAL','ABNORMAL->ONLINE')"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_by_projectid_status(project_id, status, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL where PROJECT_ID = '" + str(project_id) + r"' AND UPPER(STATUS) = '" + str(status) + r"' order by MODEL_ID desc"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_by_projectid_status_filterfeature(project_id, status, filter_feature, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL where PROJECT_ID = '" + str(project_id) + r"' AND UPPER(STATUS) = '" + str(status) + r"' AND FILTER_FEATURE = '" + str(filter_feature) + r"' order by MODEL_ID desc"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_by_projectid_status2_filterfeature(project_id, status1, status2, filter_feature, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL where PROJECT_ID = '" + str(project_id) + r"' AND UPPER(STATUS) in ('" + str(status1) + r"','" + str(status2) + r"') AND FILTER_FEATURE = '" + str(filter_feature) + r"' order by MODEL_ID desc"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_model_by_projectid_predictresult(project_id, predict_result, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_PROJECT_MODEL where PROJECT_ID = '" + str(project_id) + r"' AND UPPER(RETRAIN_TYPE) in ('ABNORMAL','ABNORMAL->ONLINE') AND PREDICT_RESULT = '" + str(predict_result) + r"' and PREDICT_START_TIME is not null and RETRAIN_END_TIME is not null"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_online_scantime_by_projectid_datatype(project_id, datatype, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_ONLINE_SCANTIME where PROJECT_ID = '" + str(project_id)  + r"' AND UPPER(DATATYPE) = '" + str(datatype) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_online_scantime_x_by_onlineserver(online_server, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select A.*, B.DATATYPE, B.NO, B.LAST_SCANTIME from SVM_PROJECT A, SVM_ONLINE_SCANTIME B where A.PROJECT_ID = B.PROJECT_ID AND A.MODEL_TYPE IN ('1','2') AND UPPER(A.STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND UPPER(B.DATATYPE) IN ('X') AND ONLINE_SERVER = '" + str(online_server)  + r"' order by B.LAST_SCANTIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_online_scantime_model_x_by_onlineserver_status(online_server, status, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select C.*, D.MODEL_ID, D.MODEL_SEQ from (select A.*, B.DATATYPE, B.NO, B.LAST_SCANTIME from SVM_PROJECT A, SVM_ONLINE_SCANTIME B where A.PROJECT_ID = B.PROJECT_ID AND A.MODEL_TYPE IN ('1','2') AND UPPER(A.STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND UPPER(B.DATATYPE) IN ('X') AND ONLINE_SERVER = '" + str(online_server) + r"') C left join (select * from SVM_PROJECT_MODEL where UPPER(STATUS) = '" + str(status) + r"') D on C.PROJECT_ID = D.PROJECT_ID order by C.LAST_SCANTIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_online_scantime_x_many_by_onlineserver(online_server, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select A.*, B.DATATYPE, B.NO, B.LAST_SCANTIME from SVM_PROJECT A, SVM_ONLINE_SCANTIME B where A.PROJECT_ID = B.PROJECT_ID AND A.MODEL_TYPE IN ('3') AND UPPER(A.STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND UPPER(B.DATATYPE) IN ('X') AND ONLINE_SERVER = '" + str(online_server)  + r"' order by B.LAST_SCANTIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_online_scantime_y_by_onlineserver(online_server, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select A.*, B.DATATYPE, B.NO, B.LAST_SCANTIME from SVM_PROJECT A, SVM_ONLINE_SCANTIME B where A.PROJECT_ID = B.PROJECT_ID AND A.MODEL_TYPE IN ('1','2') AND UPPER(A.STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND UPPER(B.DATATYPE) IN ('Y') AND ONLINE_SERVER = '" + str(online_server)  + r"' order by B.LAST_SCANTIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_online_scantime_model_y_by_onlineserver_status(online_server, status, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select C.*, D.MODEL_ID, D.MODEL_SEQ from (select A.*, B.DATATYPE, B.NO, B.LAST_SCANTIME from SVM_PROJECT A, SVM_ONLINE_SCANTIME B where A.PROJECT_ID = B.PROJECT_ID AND A.MODEL_TYPE IN ('1','2') AND UPPER(A.STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND UPPER(B.DATATYPE) IN ('Y') AND ONLINE_SERVER = '" + str(online_server) + r"') C left join (select * from SVM_PROJECT_MODEL where UPPER(STATUS) = '" + str(status) + r"') D on C.PROJECT_ID = D.PROJECT_ID order by C.LAST_SCANTIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_online_scantime_y_many_by_onlineserver(online_server, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select A.*, B.DATATYPE, B.NO, B.LAST_SCANTIME from SVM_PROJECT A, SVM_ONLINE_SCANTIME B where A.PROJECT_ID = B.PROJECT_ID AND A.MODEL_TYPE IN ('3') AND UPPER(A.STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND UPPER(B.DATATYPE) IN ('Y') AND ONLINE_SERVER = '" + str(online_server)  + r"' order by B.LAST_SCANTIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_project_online_scantime_by_projectid_datatype(project_id, datatype, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select A.*, B.DATATYPE, B.NO, B.LAST_SCANTIME from SVM_PROJECT A, SVM_ONLINE_SCANTIME B where A.PROJECT_ID = B.PROJECT_ID AND UPPER(A.STATUS) IN ('ONLINE','RETRAIN','RETRAINING','RETRAIN_OK') AND A.PROJECT_ID = '" + str(project_id) + r"' AND B.DATATYPE = '" + str(datatype) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_online_parameter_by_projectid(project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_ONLINE_PARAMETER where PROJECT_ID = '" + str(project_id) + r"' order by SEQ"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_online_parameter_by_projectid_xy(project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_ONLINE_PARAMETER where PROJECT_ID = '" + str(project_id) + r"' and UPPER(DATATYPE) in ('X','Y') order by SEQ"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_online_parameter_by_projectid_datatype(project_id, datatype, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_ONLINE_PARAMETER where PROJECT_ID = '" + str(project_id) + r"' and DATATYPE = '" + datatype + r"' order by SEQ"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_online_parameter_and_projectx_parameter_data_by_projectid_datatype_runindex_null(project_id, projectid, datatype, runindex, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select a.*, b.PARAM_VALUE from (select * from svm_online_parameter where project_id = '" + str(projectid) + r"' and datatype = '" + datatype + r"') a LEFT JOIN (select * from " + str(project_id) + r"_parameter_data where runindex = '" + str(runindex) + r"') b on a.online_parameter = b.parameter where b.param_value is null order by a.seq"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_online_parameter_and_projectx_parameter_data_by_projectid_datatype_runindex_notnull(project_id, projectid, datatype, runindex, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select a.*, b.PARAM_VALUE from (select * from svm_online_parameter where project_id = '" + str(projectid) + r"' and datatype = '" + datatype + r"') a LEFT JOIN (select * from " + str(project_id) + r"_parameter_data where runindex = '" + str(runindex) + r"') b on a.online_parameter = b.parameter where b.param_value is not null order by a.seq"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_online_status_by_projectid_runindex(project_id, runindex, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 =ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from SVM_ONLINE_STATUS where PROJECT_ID = '" + str(project_id) + r"' and RUNINDEX = '" + str(runindex) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+#mark
+def select_projectx_10run_by_itime(project_id, last_scantime, max_time, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select top 10 * from " + str(project_id) + "_RUN where ITIME > '" + last_scantime + r"' AND ITIME < '" + max_time + r"' order by ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_projectx_run_by_itime(project_id, last_scantime, max_time, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = r"select * from " + str(project_id) + "_RUN where ITIME > '" + last_scantime + r"' AND ITIME < '" + max_time + r"' order by ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_projectx_run_by_runindex(project_id, runindex, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = "select * from " + str(project_id) + r"_RUN where RUNINDEX = '" + str(runindex) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_projectx_parameter_data_by_runindex(project_id, runindex, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = "select * from " + str(project_id) + "_PARAMETER_DATA where RUNINDEX = '" + str(runindex) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+#mark
+def select_projectx_parameter_data_by_runindex_parameter(project_id, runindex, parameter, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = "select * from " + str(project_id) + "_PARAMETER_DATA where RUNINDEX = " + str(runindex) + r" and UPPER(PARAMETER) = '" + str(parameter).upper() + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_projectx_parameter_data_by_parameter_itime(project_id, parameter, itime, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    #sql = "select * from " + str(project_id) + r"_PARAMETER_DATA where UPPER(PARAMETER) = '" + str(parameter.upper()) + r"' and ITIME > '" + itime + r"' order by ITIME" 
+    sql = "select B.* from " + str(project_id) + r"_RUN as A inner join " + str(project_id) + r"_PARAMETER_DATA as B on A.RUNINDEX = B.RUNINDEX Where A.MEATIME is not null and UPPER(B.PARAMETER) = '" + str(parameter.upper()) + r"' and  B.ITIME > '" + itime + r"' order by B.ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_projectx_parameter_data_by_parameter_itime_itime(project_id, parameter, itime1, itime2, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    #sql = "select * from " + str(project_id) + r"_PARAMETER_DATA where UPPER(PARAMETER) = '" + str(parameter.upper()) + r"' and ITIME > '" + itime1 + r"' and ITIME < '" + itime2 + r"' order by ITIME" 
+    sql = "select B.* from " + str(project_id) + r"_RUN as A inner join " + str(project_id) + r"_PARAMETER_DATA as B on A.RUNINDEX = B.RUNINDEX Where A.MEATIME is not null and UPPER(B.PARAMETER) = '" + str(parameter.upper()) + r"' and  B.ITIME > '" + itime1 + r"' and B.ITIME < '" + itime2 + r"' order by B.ITIME"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def select_projectx_predict_data_all_by_runindex_parameter_isretrainpredict(project_id, runindex, parameter, is_retrain_predict, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = "select top 1 * from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(runindex) + r" and PARAMETER = '" + str(parameter) + r"' and IS_RETRAIN_PREDICT = '" + str(is_retrain_predict) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+#20191009 select top1 1 Coulum to speed up
+def select_projectx_predict_data_by_runindex_parameter_modelid(project_id, runindex, parameter, model_id, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = "select top 1 RUNINDEX from " + str(project_id) + "_PREDICT_DATA where RUNINDEX = " + str(runindex) + r" and PARAMETER = '" + str(parameter) + r"' and MODEL_ID = " + str(model_id)
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+#20191009 select top1 1 Coulum to speed up
+def select_projectx_contribution_data_by_runindex_parameter_model(project_id, runindex, parameter, model, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    sql = "select top 1 RUNINDEX from " + str(project_id) + "_CONTRIBUTION_DATA where RUNINDEX = " + str(runindex) + r" and PARAMETER = '" + str(parameter) + r"' and MODEL = '" + str(model) + r"'"
+    df_project_model = pd.read_sql(sql, cnxn1)
+    
+    return df_project_model
+
+def update_project_STATUS_by_projectid(status, project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT SET STATUS = ? WHERE PROJECT_ID = ?", str(status), int(project_id))
+    cnxn1.commit()
+
+def update_project_predictstatus_by_projectid(predict_status, project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT SET PREDICT_STATUS = ? WHERE PROJECT_ID = ?", str(predict_status), int(project_id))
+    cnxn1.commit()
+
+def update_project_STATUS_trainingserver_by_projectid(status, training_server, project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT SET STATUS = ?, TRAINING_SERVER = ? WHERE PROJECT_ID = ?", str(status), str(training_server), int(project_id))
+    cnxn1.commit()
+
+def update_project_model_modelstatus_by_modelid(model_status, model_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT_MODEL SET MODEL_STATUS = ? WHERE MODEL_ID = ?", str(model_status), int(model_id))
+    cnxn1.commit()
+    
+def update_project_model_retrainstarttime_by_modelid(retrain_start_time, model_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT_MODEL SET RETRAIN_START_TIME = ? WHERE MODEL_ID = ?", retrain_start_time, int(model_id))
+    cnxn1.commit()
+    
+def update_project_model_predictresult_by_modelid(predict_result, model_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    sql = 'UPDATE SVM_PROJECT_MODEL SET PREDICT_RESULT = \'{}\' WHERE MODEL_ID = {}'.format(str(predict_result), int(model_id))
+    cursor1.execute(sql)
+    #cursor1.execute("UPDATE SVM_PROJECT_MODEL SET PREDICT_RESULT = ? WHERE MODEL_ID = ?", str(predict_result), int(model_id))
+    cnxn1.commit()
+
+def update_project_model_retrainendtime_retrainresult_by_modelid(retrain_end_time, retrain_result, model_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT_MODEL SET RETRAIN_END_TIME = ?, RETRAIN_RESULT = ? WHERE MODEL_ID = ?", retrain_end_time, str(retrain_result), int(model_id))
+    cnxn1.commit()
+    
+def update_project_model_modelstatus_modelstep_waitconfirm_by_modelid(model_status, model_step, wait_confirm, model_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT_MODEL SET MODEL_STATUS = ?, MODEL_STEP = ?, WAIT_CONFIRM = ? WHERE MODEL_ID = ?", str(model_status), str(model_step), int(wait_confirm), int(model_id))
+    cnxn1.commit()
+    
+def update_project_model_mae_mape_by_modelid(mae, mape, model_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT_MODEL SET MAE = ?, MAPE = ? WHERE MODEL_ID = ?", float(mae), float(mape), int(model_id))
+    cnxn1.commit()
+
+def update_project_model_errorconfirm_by_projectid(error_confirm, project_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT_MODEL SET ERROR_CONFIRM = ? WHERE PROJECT_ID = ?", int(error_confirm), int(project_id))
+    cnxn1.commit()
+    
+def update_project_model_errorconfirm_errormessage_by_modelid(error_confirm, error_message, model_id, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_PROJECT_MODEL SET ERROR_CONFIRM = ?, ERROR_MESSAGE = ? WHERE MODEL_ID = ?", int(error_confirm), str(error_message), int(model_id))
+    cnxn1.commit()
+    
+def update_online_scantime_lastscantime_by_projectid_datatype(last_scantime, project_id, datatype, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_ONLINE_SCANTIME SET LAST_SCANTIME = ? WHERE PROJECT_ID = ? AND DATATYPE = ?", last_scantime, int(project_id), str(datatype))
+    cnxn1.commit()
+    
+def update_online_status_xdialarm_by_projectid_runindex(xdi_alarm, project_id, runindex, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_ONLINE_STATUS SET XDI_ALARM = ? WHERE PROJECT_ID = ? AND RUNINDEX = ?", int(xdi_alarm), int(project_id), int(runindex))
+    cnxn1.commit()
+
+def update_online_status_ydialarm_by_projectid_runindex(ydi_alarm, project_id, runindex, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    cursor1.execute("UPDATE SVM_ONLINE_STATUS SET YDI_ALARM = ? WHERE PROJECT_ID = ? AND RUNINDEX = ?", int(ydi_alarm), int(project_id), int(runindex))
+    cnxn1.commit()
+    
+def update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(projectx_predict_data, param_value, is_retrain_predict, runindex, parameter, model_id, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    sql = 'UPDATE {} SET PARAM_VALUE = {}, IS_RETRAIN_PREDICT = {}, ITIME = getdate() WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL_ID = {}'.format(projectx_predict_data+"_PREDICT_DATA", param_value, is_retrain_predict, int(runindex), str(parameter), int(model_id))
+    cursor1.execute(sql)       
+    cnxn1.commit() 
+
+def update_projectx_run_signal_by_runindex(projectx_run, signal, runindex, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    sql = 'UPDATE {} SET SIGNAL = {} WHERE RUNINDEX = {}'.format(projectx_run+"_RUN", int(signal), int(runindex))
+    cursor1.execute(sql)       
+    cnxn1.commit() 
+
+def update_projectx_run_xdialarm_by_runindex(projectx_run, xdi_alarm, runindex, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    sql = 'UPDATE {} SET XDI_ALARM = {} WHERE RUNINDEX = {}'.format(projectx_run+"_RUN", int(xdi_alarm), int(runindex))
+    cursor1.execute(sql)       
+    cnxn1.commit() 
+
+def update_projectx_run_ydialarm_by_runindex(projectx_run, ydi_alarm, runindex, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    sql = 'UPDATE {} SET YDI_ALARM = {} WHERE RUNINDEX = {}'.format(projectx_run+"_RUN", int(ydi_alarm), int(runindex))
+    cursor1.execute(sql)       
+    cnxn1.commit() 
+
+def update_projectx_contribution_data_contribution_by_runindex_parameter_model(projectx_contribution_data, contribution, runindex, parameter, model, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    sql = 'UPDATE {} SET CONTRIBUTION = {} WHERE RUNINDEX = {} AND PARAMETER = \'{}\' AND MODEL = \'{}\''.format(projectx_contribution_data+"_CONTRIBUTION_DATA", float(contribution), int(runindex), str(parameter), str(model))
+    cursor1.execute(sql)       
+    cnxn1.commit() 
+    
+def insert_online_status_projectid_runindex_xdialarm_itime(project_id, runindex, xdi_alarm, itime, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()  
+    cursor1.execute("insert into SVM_ONLINE_STATUS(PROJECT_ID, RUNINDEX, XDI_ALARM, ITIME) values (?,?,?,?)", int(project_id), int(runindex), int(xdi_alarm), itime)
+    cnxn1.commit() 
+
+def insert_online_status_projectid_runindex_ydialarm_itime(project_id, runindex, ydi_alarm, itime, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()  
+    cursor1.execute("insert into SVM_ONLINE_STATUS(PROJECT_ID, RUNINDEX, YDI_ALARM, ITIME) values (?,?,?,?)", int(project_id), int(runindex), int(ydi_alarm), itime)
+    cnxn1.commit() 
+
+def insert_estone_projectid_mapkey_detectedtime_estonetime_estoneuserid_estonetaskid_estonestatus(project_id, map_key, detected_time, estone_time, estone_userid, estone_taskid, estone_status, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()  
+    cursor1.execute("insert into SVM_ESTONE(PROJECT_ID, MAP_KEY, DETECTED_TIME, ESTONE_TIME, ESTONE_USERID, ESTONE_TASKID, ESTONE_STATUS) values (?,?,?,?,?,?,?)", int(project_id), map_key, detected_time, estone_time, estone_userid, str(estone_taskid), str(estone_status))
+    cnxn1.commit() 
+    
+def insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(projectx_predict_data, runindex, parameter, param_value, model_id, is_retrain_predict, server_name1=ServerConfig.SmartPrediction_DBServer_IP, db_name1 = ServerConfig.SmartPrediction_Config_DB):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+        
+    #APLog.WriteApLog("server_name1:"+db_name1+ str(projectx_predict_data) ,  3344)
+    cursor1 = cnxn1.cursor()
+    sql = 'INSERT INTO {} (RUNINDEX,PARAMETER,PARAM_VALUE,MODEL_ID,IS_RETRAIN_PREDICT,ITIME) VALUES ({},\'{}\',{},{},{},getdate())'.format(projectx_predict_data+"_PREDICT_DATA", int(runindex), str(parameter), param_value, int(model_id), is_retrain_predict)
+    #APLog.WriteApLog("insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict:" + sql , 3344)
+    
+    cursor1.execute(sql)       
+    cnxn1.commit()  
+    
+def insert_projectx_contribution_data_runindex_model_parameter_contribution(projectx_contribution_data, runindex, model, parameter, contribution, server_name1="10.97.36.137", db_name1 = "APC"):
+    cnxn1 = DB_Connection(server_name=server_name1, db_name=db_name1)
+    
+    cursor1 = cnxn1.cursor()
+    sql = 'INSERT INTO {} (RUNINDEX,MODEL,PARAMETER,CONTRIBUTION,ITIME) VALUES ({},\'{}\',\'{}\',{},getdate())'.format(projectx_contribution_data+"_CONTRIBUTION_DATA", int(runindex), str(model), str(parameter), float(contribution))
+    cursor1.execute(sql)       
+    cnxn1.commit() 
+    
+   
+
+# 
