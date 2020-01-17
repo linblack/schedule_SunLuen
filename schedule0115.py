@@ -12220,4 +12220,695 @@ if __name__ == '__main__':
 
 
 
+# ProcException.py
+# -*- coding: utf-8 -*-
+import sys
+import traceback
+
+def ProcessException(e):
+    error_class = e.__class__.__name__ #取得錯誤類型
+    detail = e.args[0] #取得詳細內容
+    cl, exc, tb = sys.exc_info() #取得Call Stack
+    #lastCallStack = traceback.extract_tb(tb)[-1] #取得Call Stack的最後一筆資料
+    ErrStackLength = traceback.extract_tb(tb)
+    ErrStackTrackTemplate = "File {}, line {}, in {} \n"
+    ErrStackTrackMsg = ""
+    for ErrStack in ErrStackLength:
+        ErrStackTrackMsg = ErrStackTrackMsg + ErrStackTrackTemplate.format(ErrStack[0] , ErrStack[1], ErrStack[2])
+        
+    #fileName = lastCallStack[0] #取得發生的檔案名稱
+    #lineNum = lastCallStack[1] #取得發生的行號
+    #funcName = lastCallStack[2] #取得發生的函數名稱
+    #errMsg = "File {}, line {}, in {}: [{}] {}".format(fileName, lineNum, funcName, error_class, detail)
+    errMsg = "[{}] {}".format(error_class, detail) + " \n" + ErrStackTrackMsg
+    #print("errMsg=" + errMsg)
+    return errMsg
+
+
+
+# APLog.py
+# -*- coding: utf-8 -*-
+import datetime
+import SystemConfig.ServerConfig as ServerConfig
+import os
+def WriteApLog(LogText, projectid = 0):    
+    tNow = datetime.datetime.now()        # Reaver         
+    LogDatePart = tNow.strftime("%Y%m%d") # Reaver
+    SystemLog_Path = ServerConfig.Log_Path + "\\" + LogDatePart + ServerConfig.Log_Keep_Day + "\\" + str(projectid) + ServerConfig.LogFileExtension # Reaver
+    
+    tLog_path, error_filename = os.path.split(SystemLog_Path)
+    if not os.path.exists(tLog_path):
+            os.makedirs(tLog_path)
+            
+    tLogfile = open(SystemLog_Path, "a+")        
+    tLogfile.writelines(tNow.strftime("%Y-%m-%d %H:%M:%S.%f") + " - " + str(LogText) + "\r" )
+    tLogfile.flush()
+    tLogfile.close()
+	
+	
+
+# AI365_v3_realy.py
+# -*- coding: utf-8 -*-
+#20191023 add AI health csv save
+#20191029 add MAE/MAPE compute for realY
+import json
+import requests
+import pandas as pd
+import datetime
+#import time
+from CreateLog import WriteLog # Reaver
+from DB_operation import select_project_config_by_modelid_1ST_2ND_3RD, select_online_parameter_by_projectid_datatype, select_projectx_predict_data_all_by_runindex_parameter_isretrainpredict, select_projectx_predict_data_by_runindex_parameter_modelid, update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid, insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict
+
+def isNan(num):
+    return num != num
+
+def AI_365(fab, project_id, projectID, PROJECT_TITLE, model_id, runindex, realy, server_name, db_name):
+    serverIp = "10.97.32.171" #serverIp = "tcw314"
+    serverPort = "8003"
+    trxCat = "modelstatus"
+    connTimeOut = 60
+    waitTimeOut = 60                    
+    svm_project_id = "SVM_PROJECT" + str(project_id)
+    mylog = WriteLog('D:\\APInfo\\AI365.log', 'D:\\APInfo\\AI365_Error.log')  # Reaver
+    
+	
+    #20190820 get online Y
+    SVM_PROJECT_CONFIG = select_online_parameter_by_projectid_datatype(project_id, "Y")
+    SVM_PROJECT_CONFIG_LOSSFUNCTION = select_project_config_by_modelid_1ST_2ND_3RD(model_id, "MODEL_SELECTION", SVM_PROJECT_CONFIG.OFFLINE_PARAMETER[0], "LOSS_FUNCTION")   
+    #print(SVM_PROJECT_CONFIG_LOSSFUNCTION.PARAM_VALUE[0])
+    SVM_PROJECT_CONFIG_THRESHOLD = select_project_config_by_modelid_1ST_2ND_3RD(model_id, "MODEL_SELECTION", SVM_PROJECT_CONFIG.OFFLINE_PARAMETER[0], "THRESHOLD")
+    #print(SVM_PROJECT_CONFIG_THRESHOLD.PARAM_VALUE[0])
+    SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_all_by_runindex_parameter_isretrainpredict(svm_project_id, runindex, "Predict_Y", 0, server_name, db_name)
+    #print(SVM_PROJECT_PREDICT_DATA.PARAM_VALUE[0])
+    THRESHOLD = SVM_PROJECT_CONFIG_THRESHOLD.PARAM_VALUE[0]
+	
+    if len(SVM_PROJECT_PREDICT_DATA) == 0:
+        print("----------------")
+        print(project_id)
+        print(runindex)
+        print('no predict_y')
+        print("----------------")
+    else:
+        mae = abs(float(SVM_PROJECT_PREDICT_DATA.PARAM_VALUE[0])-float(realy))
+        print(mae)
+        print(realy)
+        if float(realy) == 0.0:
+            mape = mae
+        else:
+            #print('hahaha')
+            mape = mae/float(realy)
+        print(mape)
+        if SVM_PROJECT_CONFIG_LOSSFUNCTION.PARAM_VALUE[0].upper() == 'MAE':
+            mae_mape = mae
+            mae_mape_update = str(mae_mape)[0:10]
+            
+            SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(svm_project_id, runindex, 'MAE', model_id, server_name, db_name)
+            if len(SVM_PROJECT_PREDICT_DATA) == 0:  
+                insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(svm_project_id, runindex, 'MAE', mae_mape_update, model_id, 0, server_name, db_name)                              
+            else: 
+                update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(svm_project_id, mae_mape_update, 0, runindex, 'MAE', model_id, server_name, db_name)
+            
+        elif SVM_PROJECT_CONFIG_LOSSFUNCTION.PARAM_VALUE[0].upper() == 'MAPE':
+            mae_mape = mape     
+            mae_mape_update = str(mae_mape)[0:10]
+            THRESHOLD = float(THRESHOLD)*100 #20200109 MAPE threhold * 100
+            
+            SVM_PROJECT_PREDICT_DATA = select_projectx_predict_data_by_runindex_parameter_modelid(svm_project_id, runindex, 'MAPE', model_id, server_name, db_name)
+            if len(SVM_PROJECT_PREDICT_DATA) == 0:  
+                insert_projectx_predict_data_runindex_parameter_paramvalue_modelid_isretrainpredict(svm_project_id, runindex, 'MAPE', mae_mape_update, model_id, 0, server_name, db_name)                              
+            else: 
+                update_projectx_predict_data_paramvalue_isretrainpredict_by_runindex_parameter_modelid(svm_project_id, mae_mape_update, 0, runindex, 'MAPE', model_id, server_name, db_name)
+                        
+        if mae_mape < float(THRESHOLD):
+            kpi_operator = 'LT'
+        else:
+            kpi_operator = 'GE'
+        
+        kpi_operator = 'LT' # Reaver
+        
+        mylog.info( "ProjectID=" + str(project_id) + " , Kpi_Spec=" + THRESHOLD + " , kpi_operator=" + kpi_operator + " , MAE_MAPE=" + str(mae_mape))
+        
+        mae_mape_str = str(mae_mape) #20190725 kpi_value length must 10 or less
+        
+        PROJECT_TITLE1 = PROJECT_TITLE[0:99] #20190802 model_name length must 100 or less
+
+        # ------------------- Update Model Health ----------------------#
+        df_Model = pd.DataFrame (
+                               {
+                                   'model_name' : [PROJECT_TITLE1],  #[APC].[dbo].[SVM_PROJECT_MODEL].[MODEL_TITLE]  
+                                   'model_version' : ['1']     #[APC].[dbo].[SVM_PROJECT_MODEL].[MODEL_SEQ]  
+                               }
+                      )
+        
+        df_ModelKpi = pd.DataFrame (
+                               {
+                                   'model_name' : [PROJECT_TITLE1],                              
+                                   'kpi_value' : [mae_mape_str[0:10]],
+                                   'kpi_spec' : [THRESHOLD],
+                                   'kpi_name' : [SVM_PROJECT_CONFIG_LOSSFUNCTION.PARAM_VALUE[0].upper()],
+                                   'kpi_operator' : [kpi_operator] # >= , >= , > value=9 spec=10 operator=GE >= alarm , value=11 spec=10 operator=GE >= OK
+                               }
+                       )
+        #kpi的數值與規格的運算子(望大or望小)
+        # > : GT (大於 Great Than)
+        # < : LT (小於 Less Than)
+        # ≧ : GE (大於等於 Great Equal )
+        # ≦ : LE (小於等於 Less Equal)
+        
+        mData = json.loads('{"fab" : "'+ fab + '", "project_id" : "'+ projectID + '", "model_infos" : []}')
+        
+        for index, row in df_Model.iterrows():
+            print(row['model_name'])
+            mData['model_infos'].append (
+                    {
+                        "model_name": row['model_name'] , "model_version": row['model_version'],
+                        "kpi_infos":[]
+                    }
+            )
+            
+            df_Kpi = df_ModelKpi[(df_ModelKpi.model_name == row['model_name'] )]    
+            print("df_Kpi.shape=", df_Kpi.shape)
+            for indexKpi, rowKpi in df_Kpi.iterrows():
+                idx = len(mData['model_infos']) - 1
+                mData['model_infos'][idx]['kpi_infos'].append (
+                        {
+                             "kpi_value": rowKpi['kpi_value'] , "kpi_spec": rowKpi['kpi_spec'],  
+                             "kpi_name": rowKpi['kpi_name'] , "kpi_operator": rowKpi['kpi_operator']
+                        }
+                    )
+        
+        print(json.dumps(mData))
+        
+        
+		
+        print(mData['model_infos'][0]['model_name'])
+        rptData = json.dumps(mData) # object to string
+        url = 'http://' + serverIp + ":" + serverPort + "/" + trxCat + "/"
+        print("url=",url)
+        headers = {'Content-Type': 'application/json'}
+        #20190814 OA must add proxy setup
+        proxies = {'http': 'http://10.97.4.1:8080',
+                   'https': 'http://10.97.4.1:8080'}
+        response = requests.post(url, data=rptData, headers=headers,timeout=(connTimeOut, waitTimeOut), proxies=proxies)
+		#mylog.info( str(response.text) ) 
+		
+        print(datetime.datetime.now(),"Status=", response.status_code, "response=" , response.text)   #{"rtn_code": "00000", "rtn_msg": "Successfully!“}               
+		
+		
+				
+# DataImputation.py
+import numpy as np
+
+
+def ImputebySTD(dfs_, col_mean=None, col_median=None, col_std=None):
+
+    if col_mean is None:
+        col_mean = dfs_.mean()
+    if col_std is None:
+        col_std = dfs_.std()
+    if col_median is None:
+        col_median = dfs_.median()
+
+    impute_list = [col_mean, col_median]
+
+    ok_value = dfs_.loc[~dfs_.isna()]
+    na_amount = sum(dfs_.isna())
+
+    diff_std = []
+    for impute_value in impute_list:
+        new_std = np.append(np.array(ok_value), [impute_value] * na_amount).std()
+        diff_std.append(abs(col_std - new_std))
+
+    return impute_list[np.argmin(diff_std)]
+
+
+def GroupColCheck(dfs_, configs_):
+
+    # if configs_['Data_Imputation']["Same"] == 1:
+    #     group_by_col = configs_['Merge_Category_Columns']['New_Columns']
+    #
+    # elif configs_["Data_Imputation"]["Same"] == 0:
+    #     merge_col_list = configs_['Data_Imputation']['Group_List']
+    #     group_by_col = "_".join(merge_col_list)
+    #     dfs_[group_by_col] = dfs_[merge_col_list].apply(lambda x: '_'.join(x), axis=1
+    merge_col_list = configs_['Data_Imputation']['Group_List']
+    group_by_col = "PANDAS_KING_DAVID"
+    # dfs_[group_by_col] = dfs_[merge_col_list].apply(lambda x: '_'.join(str(x)), axis=1)
+    # print(merge_col_list)
+    # # print(dfs_[merge_col_list[0]])
+    # # print(dfs_[merge_col_list[1]])
+    # print(dfs_[merge_col_list[2]])
+    # print(dfs_[merge_col_list[3]])
+    dfs_[group_by_col] = dfs_[merge_col_list].apply(lambda x: '_'.join(str(e) for e in x), axis=1)
+
+    return dfs_, group_by_col
+
+
+def DataImputation(dfs, configs):
+
+    DataImpute_configs = {}
+
+    strategy = configs['Data_Imputation']['Strategy']
+
+    # print(configs['Data_Imputation'])
+
+
+    if len(configs["Data_Imputation"]["Group_List"]) == 0:
+        for col in dfs.columns:
+            # 20190826 revised because this function will delete group col
+            # if (col in configs["Index_Columns"]) | (col in configs["Y"]):
+            #     continue
+            if (col in configs["IDX"]) | (col in configs["Y"]):
+                continue
+            DataImpute_configs[col] = {}
+            DataImpute_configs[col]["STD_CHECK"] = 0
+
+            if strategy in ["Mean", "Median"]:
+                if strategy == "Mean":
+                    impute_value = dfs[col].mean()
+                elif strategy == "Median":
+                    impute_value = dfs[col].median()
+
+                DataImpute_configs[col]['DEFAULT_VALUE'] = impute_value
+                if sum(dfs[col].isna()) != 0:
+                    dfs[col].fillna(impute_value, inplace=True)
+
+            elif strategy == "STD":
+                # print(dfs[col])
+                DataImpute_configs[col]['DEFAULT_Mean'] = dfs[col].mean()
+                DataImpute_configs[col]['DEFAULT_Median'] = dfs[col].median()
+                if sum(dfs[col].isna()) == 0:
+                    DataImpute_configs[col]["STD_CHECK"] = 1
+                elif sum(dfs[col].isna()) != 0:
+                    impute_value = ImputebySTD(dfs[col])
+                    DataImpute_configs[col]['DEFAULT_VALUE'] = impute_value
+                    dfs[col].fillna(impute_value, inplace=True)
+
+        return dfs, configs, DataImpute_configs
+
+    elif len(configs["Data_Imputation"]["Group_List"]) != 0:
+        dfs, group_by_col = GroupColCheck(dfs, configs)
+
+        if strategy in ["Median"]:
+            for col in dfs.columns:
+
+                # 20190826 revised because this function will delete group col
+                # if (col in configs["Index_Columns"]) | (col in configs["Y"]):
+                #     continue
+                if (col in configs["IDX"]) | (col in configs["Y"]):
+                    continue
+
+                if col == group_by_col:
+                    continue
+
+                DataImpute_configs[col] = {}
+                col_median = dfs[col].median()
+                DataImpute_configs[col]['DEFAULT_VALUE'] = col_median
+
+                for cat_type in np.unique(dfs[group_by_col]):
+                    DataImpute_configs[col][cat_type] = {}
+                    impute_value = col_median
+                    DataImpute_configs[col][cat_type]["over30"] = 0
+                    if dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                    (~dfs[group_by_col].isna())].size > 30:
+                        impute_value = dfs[col].loc[(dfs[group_by_col] == cat_type)].median()
+                        DataImpute_configs[col][cat_type]["over30"] = 1
+
+                    elif dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                      (~dfs[group_by_col].isna())].size < 30:
+                        print(col, cat_type, "NO impute by Group")
+
+                    DataImpute_configs[col][cat_type]['DEFAULT_VALUE'] = impute_value
+                    # dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+                    # 20190829 fillna revised
+                    fillna_mask = (dfs[group_by_col] == cat_type)
+                    dfs.loc[fillna_mask, col] = dfs.loc[fillna_mask, col].fillna(impute_value)
+
+                if sum(dfs[col].isna()):
+                    dfs[col].fillna(col_median, inplace=True)
+                    print("ERROR")
+
+        elif strategy in ["Mean"]:
+            for col in dfs.columns:
+                # 20190826 revised because this function will delete group col
+                # if (col in configs["Index_Columns"]) | (col in configs["Y"]):
+                #     continue
+                if (col in configs["IDX"]) | (col in configs["Y"]):
+                    continue
+
+                if col == group_by_col:
+                    continue
+                DataImpute_configs[col] = {}
+                col_mean = dfs[col].mean()
+                DataImpute_configs[col]['DEFAULT_VALUE'] = col_mean
+
+                for cat_type in np.unique(dfs[group_by_col]):
+                    DataImpute_configs[col][cat_type] = {}
+                    impute_value = col_mean
+                    DataImpute_configs[col][cat_type]["over30"] = 0
+                    if dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                    (~dfs[group_by_col].isna())].size > 29:
+                        DataImpute_configs[col][cat_type]["over30"] = 1
+                        impute_value = dfs[col].loc[(dfs[group_by_col] == cat_type)].col_mean()
+
+                    elif dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                      (~dfs[group_by_col].isna())].size < 30:
+                        print(col, cat_type, "NO impute by Group")
+
+                    DataImpute_configs[col][cat_type]['DEFAULT_VALUE'] = impute_value
+                    # dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+                    # 20190829 fillna revised
+                    fillna_mask = (dfs[group_by_col] == cat_type)
+                    dfs.loc[fillna_mask, col] = dfs.loc[fillna_mask, col].fillna(impute_value)
+
+                if sum(dfs[col].isna()):
+                    dfs[col].fillna(col_mean, inplace=True)
+                    print("ERROR")
+
+        elif strategy in ["STD"]:
+            for col in dfs.columns:
+                # 20190826 revised because this function will delete group col
+                # if (col in configs["Index_Columns"]) | (col in configs["Y"]):
+                #     continue
+                if (col in configs["IDX"]) | (col in configs["Y"]):
+                    continue
+
+                if col == group_by_col:
+                    continue
+
+                DataImpute_configs[col] = {}
+                col_median = dfs[col].median()
+                col_mean = dfs[col].mean()
+                col_std = dfs[col].std()
+                DataImpute_configs[col]['DEFAULT_Mean'] = col_mean
+                DataImpute_configs[col]['DEFAULT_Median'] = col_median
+                DataImpute_configs[col]['DEFAULT_VALUE'] = col_std
+
+                for cat_type in np.unique(dfs[group_by_col]):
+                    DataImpute_configs[col][cat_type] = {}
+                    DataImpute_configs[col][cat_type]["over30"] = 0
+                    if dfs[col].loc[(dfs[group_by_col] == cat_type) &
+                                    (~dfs[group_by_col].isna())].size > 29:
+                        DataImpute_configs[col][cat_type]["over30"] = 1
+                        cat_mean = dfs[col].loc[(dfs[group_by_col] == cat_type)].mean()
+                        cat_median = dfs[col].loc[(dfs[group_by_col] == cat_type)].median()
+                        DataImpute_configs[col][cat_type]['DEFAULT_Mean'] = cat_mean
+                        DataImpute_configs[col][cat_type]['DEFAULT_Median'] = cat_median
+                        if sum(dfs[col].loc[(dfs[col].isna())]) != 0:
+                            impute_value = ImputebySTD(dfs[col].loc[(dfs[group_by_col] == cat_type)])
+                            # dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+                            # 20190829 fillna revised
+                            fillna_mask = (dfs[group_by_col] == cat_type)
+                            dfs.loc[fillna_mask, col] = dfs.loc[fillna_mask, col].fillna(impute_value)
+
+                            DataImpute_configs[col][cat_type]['DEFAULT_VALUE'] = impute_value
+
+                if sum(dfs[col].loc[(dfs[col].isna())]) != 0:
+                    impute_value = ImputebySTD(dfs[col])
+                    for cat_type in np.unique(dfs[group_by_col].loc[(dfs[col].isna())]):
+                        DataImpute_configs[col][cat_type]['DEFAULT_VALUE'] = impute_value
+                    dfs[col].fillna(impute_value, inplace=True)
+
+        else:
+            return None
+
+        dfs = dfs.drop(group_by_col, axis=1)
+
+        return dfs, configs, DataImpute_configs
+
+
+def TESTDataImputation(dfs, configs, DataImpute_configs):
+
+    strategy = configs['Data_Imputation']['Strategy']
+
+    if len(configs["Data_Imputation"]["Group_List"]) == 0:
+        for col in dfs.columns:
+            # 20190826 revised because this function will delete group col
+            # if (col in configs["Index_Columns"]) | (col in configs["Y"]):
+            #     continue
+            if (col in configs["IDX"]) | (col in configs["Y"]):
+                continue
+            
+            if sum(dfs[col].isna()) == 0:
+                continue
+
+            if DataImpute_configs[col]["STD_CHECK"] == 0:
+                impute_value = DataImpute_configs[col]['DEFAULT_VALUE']
+
+            elif DataImpute_configs[col]["STD_CHECK"] == 1:
+                col_mean = DataImpute_configs[col]['DEFAULT_Mean']
+                col_median = DataImpute_configs[col]['DEFAULT_Median']
+                impute_value = ImputebySTD(dfs[col], col_mean, col_median)
+
+            dfs[col].fillna(impute_value, inplace=True)
+
+    if len(configs["Data_Imputation"]["Group_List"]) != 0:
+        dfs, group_by_col = GroupColCheck(dfs, configs)
+        for col in dfs.columns:
+            # 20190826 revised because this function will delete group col
+            # if (col in configs["Index_Columns"]) | (col in configs["Y"]):
+            #     continue
+            if (col in configs["IDX"]) | (col in configs["Y"]):
+                continue
+
+            if col == group_by_col:
+                continue
+
+            if sum(dfs[col].isna()) == 0:
+                continue
+
+            if strategy in ["Mean", "Median"]:
+                for cat_type in np.unique(dfs[group_by_col].loc[(dfs[col].isna())]):
+                    impute_value = DataImpute_configs[col][cat_type]['DEFAULT_VALUE']
+                    # dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+                    # 20190829 fillna revised
+                    fillna_mask = (dfs[group_by_col] == cat_type)
+                    dfs.loc[fillna_mask, col] = dfs.loc[fillna_mask, col].fillna(impute_value)
+
+            elif strategy in ["STD"]:
+                for cat_type in np.unique(dfs[group_by_col].loc[(dfs[col].isna())]):
+                    if DataImpute_configs[col][cat_type]["over30"] == 0:
+                        impute_value = DataImpute_configs[col]['DEFAULT_VALUE']
+                        # 20190829 fillna revised
+                        fillna_mask = (dfs[group_by_col] == cat_type)
+                        dfs.loc[fillna_mask, col] = dfs.loc[fillna_mask, col].fillna(impute_value)
+
+                    elif DataImpute_configs[col][cat_type]["over30"] == 1:
+                        try:
+                            impute_value = DataImpute_configs[col][cat_type]['DEFAULT_VALUE']
+                            # dfs[col].loc[(dfs[group_by_col] == cat_type)].fillna(impute_value, inplace=True)
+                            # 20190829 fillna revised
+                            fillna_mask = (dfs[group_by_col] == cat_type)
+                            dfs.loc[fillna_mask, col] = dfs.loc[fillna_mask, col].fillna(impute_value)
+                        except:
+                            cat_mean = DataImpute_configs[col][cat_type]['DEFAULT_Mean']
+                            cat_median = DataImpute_configs[col][cat_type]['DEFAULT_Median']
+                            impute_value = ImputebySTD(dfs[col].loc[(dfs[group_by_col] == cat_type)],
+                                                       cat_mean,
+                                                       cat_median)
+
+                            # 20190829 fillna revised
+                            fillna_mask = (dfs[group_by_col] == cat_type)
+                            dfs.loc[fillna_mask, col] = dfs.loc[fillna_mask, col].fillna(impute_value)
+
+                if sum(dfs[col].isna()) != 0:
+                    impute_value = DataImpute_configs[col][cat_type]['DEFAULT_Median']
+                    # 20190829 fillna revised
+                    fillna_mask = (dfs[group_by_col] == cat_type)
+                    dfs.loc[fillna_mask, col] = dfs.loc[fillna_mask, col].fillna(impute_value)
+
+        dfs = dfs.drop(group_by_col, axis=1)
+
+    return dfs
+
+
+
+# DataTransform.py
+
+
+def DataTransform(dfs, configs):
+
+    DataTrans_configs = {}
+    strategy = configs['Data_Transform']['Strategy']
+
+    if len(configs["Data_Transform"]["Group_List"]) == 0:
+        if strategy == "Z_Scale":
+            DataTrans_configs['Z_Scale'] = {}
+            for col in dfs.columns:
+                if (col in configs["IDX"]) | (col in configs["Y"]):
+                    continue
+#                print("Hello-1")
+                DataTrans_configs['Z_Scale'][col] = {}
+                col_std = dfs[col].std(ddof=0)
+                col_mean = dfs[col].mean()
+                DataTrans_configs['Z_Scale'][col]['Std'] = col_std
+                DataTrans_configs['Z_Scale'][col]['Mean'] = col_mean
+                if col_std == .0:
+                    dfs[col] = dfs[col] - col_mean
+                elif col_std != .0:
+                    dfs[col] = (dfs[col] - col_mean) / col_std
+                    
+    return dfs, configs, DataTrans_configs
+
+
+def TESTDataTransform(dfs, configs, DataTrans_configs):
+
+    strategy = configs['Data_Transform']['Strategy']
+
+    if len(configs["Data_Transform"]["Group_List"]) == 0:
+        if strategy == "Z_Scale":
+            for idx, col in enumerate(dfs.columns):
+                # print(idx, col)
+                if (col in configs["IDX"]) | (col in configs["Y"]):
+                    continue
+
+                col_std = DataTrans_configs['Z_Scale'][col]['Std']
+                col_mean = DataTrans_configs['Z_Scale'][col]['Mean']
+
+                if col_std != .0:
+                    dfs[col] = (dfs[col] - col_mean) / col_std
+                elif col_std == .0:
+                    dfs[col] = dfs[col] - col_mean
+
+    return dfs
+
+
+# Remove below func on 8/15 2019 by PeterTYLin
+def OnlineDataTransform(dfs, configs, DataTrans_configs):
+
+    strategy = configs['Data_Transform']['Strategy']
+
+    if len(configs["Data_Transform"]["Group_List"]) == 0:
+        if strategy == "Z_Scale":
+            for idx, col in enumerate(dfs.columns):
+                # print(idx, col)
+                if (col in configs["IDX"]) | (col in configs["Y"]):
+                    continue
+
+                col_std = DataTrans_configs['Z_Scale'][col]['Std']
+                col_mean = DataTrans_configs['Z_Scale'][col]['Mean']
+
+                if col_std != .0:
+                    dfs[col] = (float(dfs[col].iloc[0]) - col_mean) / col_std
+                elif col_std == .0:
+                    dfs[col] = float(dfs[col].iloc[0]) - col_mean
+
+    return dfs
+
+
+
+# DataTransformY.py
+import numpy as np
+import pandas as pd
+
+
+def BuildDataTransformY(dfs, configs, transform_types, mylogs):
+
+    Y_configs = {}
+    Y_configs["Y_Columns"] = configs["Y"].copy()
+
+    for col in Y_configs["Y_Columns"]:
+        try:
+            Y_configs[col] = {}
+            Y_configs[col]["Transform_Type"] = transform_types
+            Y_configs[col]["Mean"] = 0
+            Y_configs[col]["STD"] = 1
+            Y_configs[col]["Max"] = 1
+            Y_configs[col]["Min"] = 0
+
+            if transform_types in ["Z_Score"]:
+                Y_configs[col]["Mean"] = dfs[col].mean()
+                Y_configs[col]["STD"] = dfs[col].std(ddof=0)
+
+            elif transform_types in ["MinMax"]:
+                Y_configs[col]["Max"] = dfs[col].max()
+                Y_configs[col]["Min"] = dfs[col].min()
+
+        except Exception as e:
+            mylogs.error_trace(e)
+            msg = "DataTransform Y(Preparation)\t" + str(col) + " Calculation Statistical for Transform ERROR."
+            mylogs.warning(msg)
+            msg = "DataTransform Y(Preparation)\t" + str(col) + " The parameters of Transform will be initialized."
+            mylogs.warning(msg)
+            Y_configs[col]["Mean"] = 0
+            Y_configs[col]["STD"] = 1
+            Y_configs[col]["Max"] = 1
+            Y_configs[col]["Min"] = 0
+
+    return Y_configs
+
+
+def TrainDataTransformY(dfs, Y_configs, mylogs):
+
+    for col in Y_configs["Y_Columns"]:
+        Y_col_backup = dfs[col].copy()
+        try:
+            if Y_configs[col]["Transform_Type"] in ["Z_Score"]:
+                dfs[col] -= Y_configs[col]["Mean"]
+                dfs[col] /= Y_configs[col]["STD"]
+
+            elif Y_configs[col]["Transform_Type"] in ["MinMax"]:
+                dfs[col] -= Y_configs[col]["Min"]
+                dfs[col] /= (Y_configs[col]["Max"] - Y_configs[col]["Min"])
+        except Exception as e:
+            mylogs.error_trace(e)
+            mylogs.warning("DataTransform Y(Transform)\t" + str(col) + " Transform ERROR.")
+            mylogs.warning("DataTransform Y(Transform)\t" + str(col) + " Transform Did Not Execute.")
+            dfs[col] = Y_col_backup
+
+    return dfs
+
+
+def TestDataInverseY(dfs, Y_configs, mylogs):
+
+    for col in Y_configs["Y_Columns"]:
+        y_pred_col_name = str(col) + "_pred"
+        try:
+            if Y_configs[col]["Transform_Type"] in ["Z_Score"]:
+                dfs[y_pred_col_name] *= Y_configs[col]["STD"]
+                dfs[y_pred_col_name] += Y_configs[col]["Mean"]
+
+            elif Y_configs[col]["Transform_Type"] in ["MinMax"]:
+                dfs[col] *= (Y_configs[col]["Max"] - Y_configs[col]["Min"])
+                dfs[col] -= Y_configs[col]["Min"]
+
+        except Exception as e:
+            mylogs.error_trace(e)
+            mylogs.error("DataTransform Y(Inverse)\t" + str(col) + " Inverse ERROR.")
+            mylogs.error("DataTransform Y(Inverse)\t Please Call APC for Trouble Shooting")
+
+    return dfs
+
+
+def OnlineDataInverseY(y_pred_list, y_col, Y_configs):
+
+    result = []
+
+    for y_pred in y_pred_list:
+        if Y_configs[y_col]["Transform_Type"] in ["Z_Score"]:
+            y_pred *= Y_configs[y_col]["STD"]
+            y_pred += Y_configs[y_col]["Mean"]
+
+        elif Y_configs[y_col]["Transform_Type"] in ["MinMax"]:
+            y_pred *= (Y_configs[y_col]["Max"] - Y_configs[y_col]["Min"])
+            y_pred -= Y_configs[y_col]["Min"]
+        result.append(y_pred)
+
+    return result
+
+
+
+# Formula.py
+# -*- coding: utf-8 -*-
+import math
+import numpy as np
+
+def integrand(x,a,b):
+    sigma = 1
+    mu = min(a,b)
+    coef = 1/math.sqrt(2*np.pi)/sigma
+    return 2*coef*math.exp(-0.5*((x-mu)/sigma)**2)
+
+
+
 # 
