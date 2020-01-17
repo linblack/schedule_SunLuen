@@ -12911,4 +12911,180 @@ def integrand(x,a,b):
 
 
 
-# 
+# Data_Check.py
+
+from CreateLog import WriteLog
+import pandas as pd
+from config import read_config
+import os
+
+
+def Data_Check(folder_path):
+    input_path = read_path(folder_path)
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    mylog.info("-----Data Check-----")
+
+    df_new = read_csv(input_path["raw_path"], "Data Col Check(new_path)", mylog)
+    df_old = read_csv(input_path["old_path"], "Data Col Check(old_path)", mylog)
+
+    config = read_config(input_path["config_path"], mylog)
+    y_name = config["Y"][0]
+    try:
+        df = Y_col_impute(df_new, df_old, y_name, mylog)
+        if df.values.shape[1] != 0:
+            df.to_csv(input_path["raw_path"], index=False)
+            df_new = df.copy()
+    except Exception as e:
+        mylog.error("Error while doing Y col imputation")
+        mylog.error(e)
+        return "NG", "Please contact APC team to solve the problem."
+    status, msg = row_check(config, df_new, folder_path, mylog)
+    mylog.info("-----Data Check Done-----")
+    return status, msg
+
+
+def Y_col_impute(df_new, df_old, y_name, mylog):
+    if y_name not in df_new.columns:
+        df_new[y_name] = None
+    idx, df = Data_Col_Check(df_new, df_old, mylog)
+    if not idx:
+        if df.values.shape[1] == 0:
+            raise SystemError("Data comparison fails.")
+        else:
+            return df
+    else:
+        return pd.DataFrame()
+
+
+def Data_Col_Check(df_new, df_old, mylog):
+    df_new_list = df_new.columns.tolist()
+    df_old_list = df_old.columns.tolist()
+    mylog.online("-----Data Col Check------")
+    if df_new_list == df_old_list:
+        mylog.online("-----Data Col Check Passed------")
+        return True, pd.DataFrame()
+    else:
+        diff_set_less = set(df_old_list) - set(df_new_list)
+        diff_set_more = set(df_new_list) - set(df_old_list)
+        if diff_set_less:
+            if diff_set_more:
+                show_deficiency_message(diff_set_less, mylog)
+                show_redundancy_message(diff_set_more, mylog)
+                mylog.online("-----Data Col Check Done------")
+                return False, pd.DataFrame()
+            else:
+                show_deficiency_message(diff_set_less, mylog)
+                mylog.online("-----Data Col Check Done------")
+                return False, pd.DataFrame()
+        else:
+            if diff_set_more:
+                show_redundancy_message(diff_set_more, mylog)
+                mylog.online("-----Data Col Check Done------")
+                return False, pd.DataFrame()
+            else:
+                df = df_new[df_old_list].copy()
+                mylog.warning("Feature order is changed by system.")
+                mylog.online("-----Data Col Check Done------")
+                return False, df
+
+
+def show_deficiency_message(diff_set, mylog):
+    mylog.error("New data misses something.")
+    mylog.error("Deficiency: " + ",".join(str(x) for x in diff_set))
+    return None
+
+
+def show_redundancy_message(diff_set, mylog):
+    mylog.error("New data has something more.")
+    mylog.error("Redundancy: " + ",".join(str(x) for x in diff_set))
+    return None
+
+
+def read_csv(path, program_name, mylog):
+    try:
+        df_raw = pd.read_csv(path, encoding="utf-8")
+    except Exception as e:
+        mylog.warning("Fail to read in utf-8")
+        try:
+            df_raw = pd.read_csv(path, encoding="big5")
+        except Exception as e:
+            mylog.warning("Fail to read in big5")
+            try:
+                df_raw = pd.read_csv(path, encoding="big5hkscs")
+            except Exception as e:
+                mylog.warning("Fail to read in big5hkscs")
+                df_raw = None
+                mylog.error(program_name+" : Read data error")
+                mylog.error_trace(e)
+    return df_raw
+
+
+def row_check(config, df, folder_path, mylog):
+    mylog.online("-----Data Row Check------")
+    col_num = len(df.columns)
+    if col_num == 0:
+        mylog.warning("No column in the dataframe.")
+        return None
+
+    try:
+        missing_T = config["row_missing_T"]
+        ex_cols = config["Index_Columns"]
+    except Exception as e:
+        mylog.error("Error while reading config parameter.")
+        mylog.error_trace(e)
+        raise KeyError
+
+    try:
+        columns = ex_cols.copy()
+        columns.extend(["Index", "Missing_Rate"])
+        idx_table = pd.DataFrame(columns=columns)
+        df = df.copy()
+        for idx, row in df.iterrows():
+            miss_num = row.isnull().sum()
+            rate = miss_num/col_num
+            print(rate)
+            if rate > missing_T:
+                mylog.warning("Row index "+str(idx)+" has high missing rate " + "{0:.2f}".format(rate) +
+                              " ("+str(int(miss_num))+" missed)")
+                key = df.loc[idx, ex_cols].tolist()
+                key.extend([idx, rate])
+                idx_table.loc[len(idx_table)] = key
+
+        tmp_path = os.path.join(folder_path, "missing_rate_table.csv")
+        idx_table.to_csv(tmp_path, index=False)
+    except Exception as e:
+        mylog.error("Error while doing row check")
+        mylog.error(e)
+        return "NG", "Please contact APC team to solve the problem."
+    mylog.info("-----Data Row Done------")
+    return "OK", None
+
+
+
+if __name__ == "__main__":
+    from Read_path import read_path
+    new_path = "/home/davidswwang/PycharmProjects/01_AVM/Code/Cases/New_path_test/New_path_test_00/01/02_DataReview/new.csv"
+    old_path = "/home/davidswwang/PycharmProjects/01_AVM/Code/Cases/New_path_test/New_path_test_00/01/02_DataReview/old.csv"
+    folder_path = "/home/davidswwang/PycharmProjects/01_AVM/Code/Cases/New_path_test/New_path_test_00/01/02_DataReview/"
+
+    input_path = read_path(folder_path)
+    mylog = WriteLog(input_path["log_path"], input_path["error_path"])
+    mylog.init_logger()
+
+    df_new = read_csv(new_path, "Data Col Check(new_path)", mylog)
+    df_old = read_csv(old_path, "Data Col Check(old_path)", mylog)
+
+    y_name = "YY"
+
+    # df = Y_col_impute(df_new, df_old, y_name, mylog)
+    # print(df)
+    df = pd.DataFrame({
+        "A":[1, 3, 10, None, None],
+        "B":[None,2, 20, None, 9],
+        "C":[None,6, 60, None, 8],
+        "KK":["A1", "A2", "A3", "A4", "A5"]
+    })
+    config = {}
+    config["row_missing_T"] = 0.5
+    config["Index_Columns"] = ["KK"]
+    row_check(config , df, folder_path, mylog)
