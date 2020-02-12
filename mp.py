@@ -40,3 +40,8 @@ if __name__ == '__main__':
 
             time.sleep(n)
     timer(3)
+    
+    
+   
+# segmentation deep learning
+https://github.com/tensorflow/models/tree/master/research/deeplab
