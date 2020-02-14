@@ -1,3 +1,8 @@
+https://www.phmsociety.org/events/conference/phm/15/data-challenge
+https://www.phmsociety.org/sites/phmsociety.org/files/PHM15_Competition_Second_SNU-SHRM_Final.pdf
+http://10.86.12.87:15871/cgi-bin/blockpage.cgi?ws-session=1037295495
+		
+		
 #20200121 PHM_feature_extraction_final.py
 import os
 from datetime import timedelta
